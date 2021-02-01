@@ -115,7 +115,8 @@ class MLP(nn.ModuleList):
                 )
             )
 
-    def forward(self, x):
+    def forward(self, *xs):
+        x = torch.cat(list(xs), dim=-1)
         for layer in self:
             x = layer(x)
         return x
@@ -172,7 +173,8 @@ class MultiHeadMLP(nn.Module):
             )
 
 
-    def forward(self, x):
+    def forward(self, *xs):
+        x = torch.cat(list(xs), dim=-1)
         for layer in self.layers:
             x = layer(x)
         return tuple(head(x) for head in self.heads)

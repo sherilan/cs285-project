@@ -1,11 +1,12 @@
 
+import contextlib
 
 import torch
 import torch.nn as nn
 import numpy as np
 
-import diayn.distributions as distributions
-import diayn.networks as networks
+import project.distributions as distributions
+import project.networks as networks
 
 
 
@@ -14,10 +15,30 @@ class Policy(nn.Module):
     Very agnostic base class for policies
     """
 
-    def __init__(self):
+    def __init__(self, greedy=False):
         super().__init__()
+        self.greedy = greedy
+        self.debug = False
         # Hack to figure out which device the policy is currently on
         self.device_detector = nn.Parameter(torch.zeros(0), requires_grad=False)
+
+    @contextlib.contextmanager
+    def configure(self, **temp_vals):
+        """
+        Temporarily set values for policy (e.g. greedy)
+        """
+        try:
+            # Store backup of old vals
+            old_vals = {k: getattr(self, k) for k in temp_vals}
+            # Set temporary values
+            for k, v in temp_vals.items():
+                setattr(self, k, v)
+            # Let context run
+            yield old_vals
+        finally:
+            # Revert to old values
+            for k, v in old_vals.items():
+                setattr(self, k, v)
 
     @property
     def device(self):
@@ -33,7 +54,7 @@ class Policy(nn.Module):
         """
         pass
 
-    def get_action(self, *observations, greedy=False):
+    def get_action(self, *observations, greedy=None):
         """
         Sample an action from the policy
 
@@ -42,7 +63,8 @@ class Policy(nn.Module):
             greedy (bool) whether to sample a greedy (deterministic) action
 
         Returns:
-            np.ndarry with the action sampled from the policy
+            an np.ndarray with the action sampled from the policy
+            a dict with additional info
         """
         with torch.no_grad():
             observations = [
@@ -50,8 +72,10 @@ class Policy(nn.Module):
                 for o in observations
             ]
             pi = self(*observations)
-            action = pi.sample(greedy=greedy)
-            return action.cpu().numpy()
+            action = pi.sample(greedy=self.greedy if greedy is None else greedy)
+            if self.debug:
+                import pdb; pdb.set_trace()
+            return action.cpu().numpy(), {}
 
 
 class GaussianMLPPolicy(Policy):
@@ -101,16 +125,16 @@ class GaussianMLPPolicy(Policy):
                 **mlp_kwargs
             )
 
-    def forward(self, observation):
-        mean, std = self.get_mean_and_std(observation)
+    def forward(self, *observations):
+        mean, std = self.get_mean_and_std(*observations)
         return distributions.Gaussian(mean, std)
 
-    def get_mean_and_std(self, observation):
+    def get_mean_and_std(self, *observations):
         # Compute mean/std depending on whether std is static
         if self.static_std:
-            mean, logstd = self.base(observation), self.logstd
+            mean, logstd = self.base(*observations), self.logstd
         else:
-            mean, logstd = self.base(observation)
+            mean, logstd = self.base(*observations)
         # Possibly clamp std based on configured min/max values
         if self.min_logstd is not None or self.max_logstd is not None:
             logstd = logstd.clamp(
@@ -128,6 +152,56 @@ class TanhGaussianMLPPolicy(GaussianMLPPolicy):
     A Gaussian Policy, except that actions are sqeezed through a tanh.
     """
 
-    def forward(self, observation):
-        mean, std = self.get_mean_and_std(observation)
+    def forward(self, *observations):
+        mean, std = self.get_mean_and_std(*observations)
         return distributions.TanhGaussian(mean, std)
+
+
+class SkillConditionedPolicy(Policy):
+    """
+    Wrapper around any other policy that allows skill conditioning
+    """
+
+    def __init__(self,
+        base,
+        num_skills,
+        one_hot=True,
+        skill_dist=None,
+        skill=None,
+        **kwargs
+    ):
+        super().__init__(**kwargs)
+        self.base = base
+        self.num_skills = num_skills
+        self.one_hot = one_hot
+        self.skill_dist = skill_dist
+        self.skill = skill
+
+    def reset(self):
+        super().reset()
+        self.base.reset()
+        # If no prob dist, sample uniform
+        if self.skill_dist is None:
+            self.skill = np.random.randint(self.num_skills)
+        # If an scalar, assume har_coded skill integer
+        elif np.isscalar(self.skill_dist):
+            self.skill = int(self.skill_dist)
+        # If callable, assume that it will return a new skill
+        elif callable(self.skill_dist):
+            self.skill = self.skill_dist()
+        # Otherwise, assume just a normal categorical distribution
+        else:
+            self.skill = np.random.choice(self.num_skills, p=self.skill_dist)
+
+    def get_action(self, *observations):
+        # Augment observations with a one-hot vector of current skill
+        skill_one_hot = torch.zeros(self.num_skills)
+        skill_one_hot[self.skill] = 1.0
+        observations_aug = observations + (skill_one_hot,)
+        # Get action as normal and include current skill in the info dict
+        ac, info = super().get_action(*observations_aug)
+        info['skill'] = self.skill
+        return ac, info
+
+    def forward(self, *observations):
+        return self.base(*observations)

@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-import diayn.networks as networks
+import project.networks as networks
 
 
 class Critic(nn.Module):
@@ -30,7 +30,5 @@ class QAMLPCritic(Critic):
             **mlp_kwargs
         )
 
-    def forward(self, observation, action):
-        x = torch.cat([observation, action], dim=-1)
-        q = self.base(x).squeeze(dim=-1)
-        return q
+    def forward(self, *x):
+        return self.base(*x).squeeze(dim=-1)

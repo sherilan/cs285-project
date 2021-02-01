@@ -25,11 +25,12 @@ class RingBuffer:
         # Check that values is a dict matching the keys the buffer is set up with
         if not isinstance(values, dict):
             raise ValueError(f'Received non-dict values: {type(values)}')
-        if set(values) != set(self.keys):
+        if set(self.keys) - set(values):
             raise ValueError(
                 f'Received inconsitent value keys: '
                 f'{set(values)} != {set(self.keys)}'
             )
+        values = {k: values[k] for k in self.keys}
         # Check that all values have the same length
         lengths = [len(v) for v in values.values()]
         length = lengths[0]
@@ -55,14 +56,14 @@ class RingBuffer:
                 i = j
 
 
-    def sample(self, n, replace=False, as_dict=True, tensor=False, device=None):
+    def sample(self, n, replace=True, as_dict=True, tensor=False, device=None):
         if len(self) <= 0:
             raise ValueError(f'Cannot sample from empty buffer')
         if n > len(self) and not replace:
             raise ValueError(f'Cannot sample {n} values without replacement')
         # Generate indices
         if replace:
-            idx = self.random.choice(self.size, size=n)
+            idx = self.random.randint(self.size, size=n)
         else:
             idx = self.random.permutation(self.size)[:n]
         # Sample on indices
@@ -70,12 +71,23 @@ class RingBuffer:
         # Optionally cast to torch tensors
         if tensor:
             data = {
-                k: torch.as_tensor(v, device=device) for k, v in data.items()
+                k: torch.from_numpy(v).to(device) for k, v in data.items()
             }
         if as_dict:
             return data
         else:
             return tuple(data[k] for k in self.keys)
+
+    def get_info(self):
+        info = {}
+        info['BufferSize'] = len(self)
+        for k, v in self.buffer.items():
+            info[f'Buffer{k}:avg'] = v[:len(self)].mean()
+            info[f'Buffer{k}:std'] = v[:len(self)].std()
+            info[f'Buffer{k}:max'] = v[:len(self)].max()
+            info[f'Buffer{k}:min'] = v[:len(self)].min()
+        return info
+
 
 
     def init_buffer(self, keys, dims, dtypes):
@@ -108,6 +120,12 @@ class RingBuffer:
                 dim = (self.capacity, dim)
             else:
                 dim = (self.capacity,) + tuple(dim)
+            if dtype is None or dtype == float:
+                dtype = np.float32
+            elif dtype == int:
+                dtype = np.int64
+            else:
+                dtype = dtype
             buffer[key] = np.zeros(dim, dtype=dtype)
         return buffer, keys, dims, dtypes
 

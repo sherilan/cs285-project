@@ -53,6 +53,7 @@ class EpochLogs:
         self.printf = printf or print
         self.tb_writer = tb_writer
         self.scalars = collections.OrderedDict()
+        self.videos = collections.OrderedDict()
         self.prefixes = []
 
     def push_prefix(self, *prefixes):
@@ -71,6 +72,15 @@ class EpochLogs:
         finally:
             self.pop_prefix(len(prefixes))
 
+    def add_video(self, name, video, **video_kwargs):
+        if self.prefixes:
+            name = f'{"/".join(self.prefixes)}/{name}'
+        video = Video(name, video, **video_kwargs)
+        if name in self.videos:
+            self.videos[name].add(video)
+        else:
+            self.videos[name] = video
+
     def add_scalar(self, name, value, **scalar_kwargs):
         if self.prefixes:
             name = f'{"/".join(self.prefixes)}/{name}'
@@ -80,9 +90,16 @@ class EpochLogs:
         else:
             self.scalars[name].add(scalar)
 
-    def add_scalar_dict(self, dict, **scalar_kwargs):
-        for k, v in dict.items():
-            self.add_scalar(k, v, **scalar_kwargs)
+    def add_scalar_dict(self, dict, prefix=None, **scalar_kwargs):
+        try:
+            if prefix:
+                self.push_prefix(prefix)
+            for k, v in dict.items():
+                self.add_scalar(k, v, **scalar_kwargs)
+        finally:
+            if prefix:
+                self.pop_prefix(1)
+
 
     def dump(self, step=None, debug=False, ffmt='%.4f'):
         # Extract scalars
@@ -118,20 +135,68 @@ class EpochLogs:
         self.printf('\n'.join(string))
         # If available, write scalars to tensorboard too
         if self.tb_writer:
+            # Write scalars
             tb_step = self.epoch if step is None else step
             for name, value in zip(names, values):
                 self.tb_writer.add_scalar(name, value, tb_step)
+            # Write videos
+            for name, video in self.videos.items():
+                self.tb_writer.add_video(
+                    name, video.tb_frames, tb_step, fps=video.fps
+                )
+            self.tb_writer.flush()
 
 
     def __repr__(self):
         return f'<EpochLogs {self.epoch} {list(self.scalars)}>'
 
 
+class Video:
+
+    def __init__(self, name, frames, fps=10):
+        frames = list(frames) if isinstance(frames, (list, int)) else [frames]
+        frames = [np.asarray(fs) for fs in frames]
+        if not all(len(fs.shape) == 4 for fs in frames):
+            raise ValueError('Video shape must be <L,H,W,C>')
+        if not all(fs.shape == frames[0].shape for fs in frames):
+            raise ValueError('All video frames must have the same dimensions')
+        self.name = name
+        self.frames = frames
+        self.fps = fps
+
+    @property
+    def dims(self):
+        return self.frames[0].shape
+
+    def add(self, other):
+        if not self == other:
+            raise ValueError(f'Incompatible video types: {self} != {other}')
+        self.frames += other.frames
+
+    @property
+    def tb_frames(self):
+        # Combine into single array and transpose to <N, L, C, H, W>
+        return np.stack(self.frames).transpose(0, 1, 4, 2, 3)
+
+    def __eq__(self, other):
+        return (
+            isinstance(other, Video) and
+            self.name == other.name and
+            self.dims == other.dims and
+            self.fps == other.fps
+        )
+
+    def __len__(self):
+        return len(self.frames)
+
+    def __repr__(self):
+        return f'<Video {len(self)}x{self.dims} @{self.fps}fps>'
+
 class EpochScalar:
 
     AGGS = {'mean', 'max', 'min', 'std', 'last'}
 
-    def __init__(self, name, values, agg='last', debug=False):
+    def __init__(self, name, values, agg='mean', debug=False):
         self.name = name
         self.is_single_agg = not isinstance(agg, (tuple, list))
         self.aggs = list(agg) if not self.is_single_agg else [agg]
