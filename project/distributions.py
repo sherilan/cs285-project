@@ -1,6 +1,8 @@
 
 
 import torch
+import torch.nn.functional as F
+import numpy as np
 
 
 class PolicyDistribution:
@@ -51,6 +53,10 @@ class Gaussian(PolicyDistribution):
 
 class TanhGaussian(Gaussian):
 
+    def __init__(self, *args, use_spinup_logp=True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.use_spinup_logp = use_spinup_logp
+
     def sample(self, greedy=False, grad=False):
         return torch.tanh(super().sample(greedy=greedy, grad=grad))
 
@@ -76,8 +82,13 @@ class TanhGaussian(Gaussian):
         logp = self.log_prob_from_pre_tanh(action, action_pre_tanh)
         return action, logp
 
+    def log_prob_from_pre_tanh(self, action, action_pre_tanh):
+        if self.use_spinup_logp:
+            return self.log_prob_from_pre_tanh_spinup(action_pre_tanh)
+        else:
+            return self.log_prob_from_pre_tanh_sac(action, action_pre_tanh)
 
-    def log_prob_from_pre_tanh(self, action, action_pre_tanh, eps=1e-6):
+    def log_prob_from_pre_tanh_sac(self, action, action_pre_tanh):
         """
         Computes log prob based on action before and after tanh sqeeze
 
@@ -86,7 +97,7 @@ class TanhGaussian(Gaussian):
         Given action a = tanh(u), where u~N(u|s). The density is given by:
         - pi(a|s) = N(u|s) * |det(da/du)|^-1
         The jacobian of the element-wise tanh is diag(1 - tanh^2(u)), so:
-        - pi(a|s) = N(u|s) * PROD_i[log(1 - tanh^2(u_i))]
+        - pi(a|s) = N(u|s) * PROD_i[1 - tanh^2(u_i)]
         Which, when taking the logarithm, becomes:
         - log(pi(a|s)) = log(N(u|s)) + SUM_i[log(1 - tanh^2(u_i))]
         """
@@ -102,4 +113,18 @@ class TanhGaussian(Gaussian):
             clip_diff = (1.0 - da_du) * clip_hi + (0.0 - da_du) * clip_lo
         da_du_clipped = da_du + clip_diff
         # Combine: log of product -> sum of logs
-        return logp_gaus - torch.log(da_du_clipped + eps).sum(dim=-1)
+        return logp_gaus - torch.log(da_du_clipped + 1e-6).sum(dim=-1)
+
+    def log_prob_from_pre_tanh_spinup(self, action_pre_tanh):
+        """
+        Variation on log_prob_from_pre_tanh_sac sourced from the
+        "Spinning Up" repository that is supposed to be more
+        numerically stable.
+        """
+        logp_gaus = super().log_prob(action_pre_tanh)
+        log_det_da_du = 2 * (
+            + np.log(2)
+            - action_pre_tanh
+            - F.softplus(-2 * action_pre_tanh)
+        )
+        return logp_gaus - log_det_da_du.sum(dim=-1)
