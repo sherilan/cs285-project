@@ -27,7 +27,7 @@ class Sampler:
     def is_terminal(self):
         return self.last_ob is None
 
-    def step(self):
+    def step(self, random=False):
 
         # Clear if done
         if self.last_ob is None:
@@ -36,7 +36,10 @@ class Sampler:
             ob = self.last_ob
 
         # Get action and advance env
-        ac, policy_info = self.policy.get_action(ob)
+        if random:
+            ac, policy_info = self.env.action_space.sample(), {}
+        else:
+            ac, policy_info = self.policy.get_action(ob)
         next_ob, rew, done, _ = self.env.step(ac)
 
         # Bookkeeping
@@ -54,10 +57,10 @@ class Sampler:
             ob=ob, ac=ac, rew=rew, next_ob=next_ob, done=done, **policy_info
         )
 
-    def sample_steps(self, n=None):
+    def sample_steps(self, n=None, random=False):
         data = []
         for _ in range(int(n or 1)):
-            data.append(self.step())
+            data.append(self.step(random=random))
         # If single step, convert list of dicts -> dict
         if not n:
             data = data[0]
@@ -67,14 +70,14 @@ class Sampler:
 
         return data
 
-    def sample_paths(self, n=None):
+    def sample_paths(self, n=None, random=False):
         paths = []
         for _ in range(int(n or 1)):
             # Reset and sample until terminal
             self.new_episode()
             data = []
             while True:
-                data.append(self.step())
+                data.append(self.step(random=random))
                 if self.is_terminal:
                     break
             # Convert list of dicts -> dicts of np.array
@@ -82,14 +85,16 @@ class Sampler:
             paths.append(path)
         return paths[0] if not n else path
 
-    def evaluate(self, n, render=False, render_max=None, render_size=None):
+    def evaluate(
+        self, n, random=False, render=False, render_max=None, render_size=None
+    ):
         rews = []
         rets = []
         lens = []
         frames = []
         self.new_episode()
         for i in range(n):
-            step = self.step()
+            step = self.step(random=random)
             rews.append(step['rew'])
             if render and (render_max is None or i < render_max):
                 frame = self.env.render(mode='rgb_array')
