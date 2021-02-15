@@ -53,7 +53,7 @@ def make_env(name):
             "ignore", message="^.*Box bound precision lowered.*$"
         )
         return garage.envs.GarageEnv(
-            garage.envs.normalize(gym.make('HalfCheetah-v2'))
+            garage.envs.normalize(gym.make(name))
         )
 
 def to_one_hot(indices, n):
