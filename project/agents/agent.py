@@ -38,20 +38,20 @@ class Agent(nn.Module):
         pass
 
     def save(self, name='agent.pt'):
-        # TODO: change to state_dict solution for better portability
         if self.savedir:
             path = os.path.join(self.savedir, name)
-            torch.save(self, path)
+            torch.save(self.state_dict(), path)
             self.logger.info('Agent saved to %s', path)
 
+    def load(self, path):
+        self.load_state_dict(torch.load(path))
+
     @classmethod
-    def restore(cls, path):
-        # TODO: this is pointless without state dict
-        return torch.load(path)
-        # cfg = cls.Config.from_yaml(os.path.join(savedir, 'config.yml'))
-        # agent = cls(cfg, **kwargs)
-        # agent.load()
-        # return agent
+    def restore(cls, path, name='agent.pt', **kwargs):
+        cfg = cls.Config.from_yaml(os.path.join(path, 'config.yml'))
+        agent = cls(cfg, **kwargs)
+        agent.load(os.path.join(path, name))
+        return agent
 
     @classmethod
     def run(cls, cfg, **kwargs):
