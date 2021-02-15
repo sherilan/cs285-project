@@ -61,11 +61,11 @@ class SAC(agents.Agent):
         critic_grad_norm_clip = None #20.0
 
         # -- Temperature
-        alpha_initial = 0.2
+        alpha_initial = 1.0
         target_entropy = None  # Will be inferred from action space if None
         alpha_optimizer = 'adam'
         alpha_lr = LR
-        train_alpha = False # Disable training of alpha if this is set
+        train_alpha = True # Disable training of alpha if this is set
 
 
 
