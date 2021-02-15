@@ -13,6 +13,7 @@ import project.utils as utils
 import project.critics as critics
 import project.buffers as buffers
 import project.samplers as samplers
+import project.normalizers as normalizers
 
 
 class SAC(agents.Agent):
@@ -22,27 +23,31 @@ class SAC(agents.Agent):
         # -- General
         env = 'HalfCheetah-v2'
         gamma = 0.99  # Discount factor
-        num_epochs = 500 #1_000
-        num_samples_per_epoch = 1_000
-        num_train_steps_per_epoch = 1_000
-        batch_size = 256
+        num_epochs = 1_000
+        num_samples_per_epoch = 250
+        num_train_steps_per_epoch = 500
+        batch_size = 128
         buffer_capacity = 1_000_000
         min_buffer_size = 10_000  # Min samples in replay buffer before training starts
         max_path_length_train = 1_000
-        max_path_length_eval = 1_000
-        eval_freq = 1
-        eval_size = 4_000
+
+        # -- Evaluation
+        eval_freq = 20
+        eval_size = 10_000
         eval_video_freq = -1
         eval_video_length = 200  # Max length for eval video
-        eval_video_size = (200, 200)
+        eval_video_size = [200, 200]
         eval_video_fps = 10
+        max_path_length_eval = 1_000
+
+        LR = 1e-3
 
         # -- Policy
         policy_hidden_num = 2
         policy_hidden_size = 256
         policy_hidden_act = 'relu'
         policy_optimizer = 'adam'
-        policy_lr = 3e-4
+        policy_lr = LR
         policy_grad_norm_clip = None #10.0
 
         # -- Critic
@@ -52,15 +57,16 @@ class SAC(agents.Agent):
         target_update_tau = 5e-3  # Strength of target network polyak averaging
         target_update_freq = 1  # How often to update the target networks
         critic_optimizer = 'adam'
-        critic_lr = 3e-4
+        critic_lr = LR
         critic_grad_norm_clip = None #20.0
 
         # -- Temperature
-        alpha_initial = 1.0
+        alpha_initial = 0.2
         target_entropy = None  # Will be inferred from action space if None
         alpha_optimizer = 'adam'
-        alpha_lr = 3e-4
-        train_alpha = True # Disable training of alpha if this is set
+        alpha_lr = LR
+        train_alpha = False # Disable training of alpha if this is set
+
 
 
     def init(self):
@@ -188,7 +194,9 @@ class SAC(agents.Agent):
         missing_data = self.cfg.min_buffer_size - len(self.buffer)
         if missing_data > 0:
             self.logger.info(f'Seeding buffer with {missing_data} samples')
-            self.buffer << self.train_sampler.sample_steps(n=missing_data)
+            self.buffer << self.train_sampler.sample_steps(
+                n=missing_data, random=True
+            )
 
         self.logger.info('Begin training')
         for epoch in range(1, self.cfg.num_epochs + 1):
@@ -198,7 +206,8 @@ class SAC(agents.Agent):
 
             # Sample more steps for this epoch and add to replay buffer
             self.buffer << self.train_sampler.sample_steps(
-                n=self.cfg.num_samples_per_epoch
+                n=self.cfg.num_samples_per_epoch,
+                # random=len(self.buffer) < 10_000
             )
 
             # Write statistics from training data sampling
@@ -262,15 +271,16 @@ class SAC(agents.Agent):
             # Eval, on occasions
             if epoch % self.cfg.eval_freq == 0:
                 with self.policy.configure(greedy=True):
+                    eval_num = epoch // self.cfg.eval_freq
                     render = (
                         self.cfg.eval_video_freq > 0 and
-                        epoch % self.cfg.eval_video_freq == 0
+                        eval_num % self.cfg.eval_video_freq == 0
                     )
                     eval_info, eval_frames = self.eval_sampler.evaluate(
                         n=self.cfg.eval_size,
                         render=render,
                         render_max=self.cfg.eval_video_length,
-                        render_size=self.cfg.eval_video_size,
+                        render_size=tuple(self.cfg.eval_video_size),
                     )
                 epoch_logs.add_scalar_dict(
                     eval_info, prefix='Eval', agg=['min', 'max', 'mean']
@@ -290,11 +300,11 @@ class SAC(agents.Agent):
         Generates losses for the critics
 
         Args:
-            obs (Tensor<N,O>) a batch of obervations, each O floats
-            acs (Tensor<N,A>) a batch of actions, each a float
-            rews (Tensor<N>) a batch of rewards, each a single float
-            next_obs (Tensor<N,O>) a batch of next observations (see obs)
-            dones (Tensor<N>) a batch of done flags, each a single float
+            obs (Tensor<N,O>): A batch of obervations, each O floats
+            acs (Tensor<N,A>): A batch of actions, each a float
+            rews (Tensor<N>): A batch of rewards, each a single float
+            next_obs (Tensor<N,O>): A batch of next observations (see obs)
+            dones (Tensor<N>): A batch of done flags, each a single float
 
         Returns:
             Differentiable losses (entropy bellman mse) for both critics,
@@ -323,12 +333,13 @@ class SAC(agents.Agent):
             # Combine with rewards using the Bellman recursion
             q_target = rews + (1. - dones) * self.cfg.gamma * target_q_values
 
+
         # Minimize squared distance
         qf1_mse = F.mse_loss(q1_pred, q_target)
         qf2_mse = F.mse_loss(q2_pred, q_target)
 
         # Diagonstics
-        info = {} # For later
+        info = {}
         info['QTarget'] = q_target.mean().detach()
         info['QAbsDiff'] = (q1_pred - q2_pred).abs().mean().detach()
         info['Qf1Loss'] = qf1_mse.detach()
@@ -341,7 +352,7 @@ class SAC(agents.Agent):
         Generates losses for the policy and alpha parameter
 
         Args:
-            obs (Tensor<N,O>) a batch of observations, each O floats
+            obs (Tensor<N,O>): A batch of observations, each O floats
 
         Returns:
             A differentiable policy_loss, a differentiable (log) alpha loss,
