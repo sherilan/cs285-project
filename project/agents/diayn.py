@@ -1,4 +1,5 @@
 
+
 import copy
 import functools
 import operator
@@ -14,6 +15,8 @@ import project.utils as utils
 import project.critics as critics
 import project.buffers as buffers
 import project.samplers as samplers
+import project.normalizers as normalizers
+import project.envs as envs
 
 
 class DIAYN(agents.Agent):
@@ -22,55 +25,61 @@ class DIAYN(agents.Agent):
 
         # -- General
         env = 'HalfCheetah-v2'
-        num_skills = 25
+        num_skills = 50
         gamma = 0.99  # Discount factor
-        num_epochs = 500 #1_000
-        num_samples_per_epoch = 1_000
-        num_train_steps_per_epoch = 1_000
-        batch_size = 256
+        num_epochs = 2_000
+        num_samples_per_epoch = 250
+        num_train_steps_per_epoch = 500
+        batch_size = 128
         buffer_capacity = 1_000_000
         min_buffer_size = 10_000  # Min samples in replay buffer before training starts
         max_path_length_train = 1_000
-        max_path_length_eval = 1_000
-        eval_freq = 10 # Not so frequent since it is quite expensive
-        eval_size = 4_000
+
+        # -- Evaluation
+        eval_freq = 100
+        eval_size = 10_000
         eval_video_freq = -1
-        eval_video_size = (100, 100)
         eval_video_length = 200  # Max length for eval video
+        eval_video_size = [100, 100]
         eval_video_fps = 10
+        max_path_length_eval = 1_000
+
+        LR = 1e-3
+        WIDTH = 384
 
         # -- Policy
         policy_hidden_num = 2
-        policy_hidden_size = 256
+        policy_hidden_size = WIDTH
         policy_hidden_act = 'relu'
         policy_optimizer = 'adam'
-        policy_lr = 3e-4
+        policy_lr = LR
         policy_grad_norm_clip = None #10.0
 
         # -- Discriminator
         clf_hidden_num = 2
-        clf_hidden_size = 256
+        clf_hidden_size = 128
         clf_hidden_act = 'relu'
         clf_optimizer = 'adam'
-        clf_lr = 3e-4
+        clf_lr = LR
         clf_grad_norm_clip = None #20.0
 
         # -- Critic
         critic_hidden_num = 2
-        critic_hidden_size = 256
+        critic_hidden_size = WIDTH
         critic_hidden_act = 'relu'
         target_update_tau = 5e-3  # Strength of target network polyak averaging
         target_update_freq = 1  # How often to update the target networks
         critic_optimizer = 'adam'
-        critic_lr = 3e-4
+        critic_lr = LR
         critic_grad_norm_clip = None #20.0
 
         # -- Temperature
-        alpha_initial = 0.1  # (same value ass appendix )
+        alpha_initial = 0.1
         target_entropy = None  # Will be inferred from action space if None
         alpha_optimizer = 'adam'
-        alpha_lr = 3e-4
-        train_alpha = False  # Don't train alpha by default
+        alpha_lr = LR
+        train_alpha = False # Disable training of alpha if this is set
+
 
 
     def init(self):
@@ -216,7 +225,9 @@ class DIAYN(agents.Agent):
         missing_data = self.cfg.min_buffer_size - len(self.buffer)
         if missing_data > 0:
             self.logger.info(f'Seeding buffer with {missing_data} samples')
-            self.buffer << self.train_sampler.sample_steps(n=missing_data)
+            self.buffer << self.train_sampler.sample_steps(
+                n=missing_data, random=False
+            )
 
         self.logger.info('Begin training')
         for epoch in range(1, self.cfg.num_epochs + 1):
@@ -226,11 +237,10 @@ class DIAYN(agents.Agent):
 
             # Sample more steps for this epoch and add to replay buffer
             self.buffer << self.train_sampler.sample_steps(
-                n=self.cfg.num_samples_per_epoch
+                n=self.cfg.num_samples_per_epoch,
             )
 
             # Write statistics from training data sampling
-            # data_info = self.buffer.get_info()
             data_info = {}
             data_info['BufferSize'] = len(self.buffer)
             data_info['TotalEnvSteps'] = self.train_sampler.total_steps
@@ -271,7 +281,7 @@ class DIAYN(agents.Agent):
 
                 # Train actor and tune temperature
                 policy_loss, alpha_loss, policy_info = self.actor_objective(
-                    obs=obs, skills=skills
+                    obs=obs, skills=skills,
                 )
                 policy_info['PolicyGradNorm'] = utils.optimize(
                     loss=policy_loss,
@@ -297,17 +307,18 @@ class DIAYN(agents.Agent):
                 self.logger.info('Evaluating %s skills', self.cfg.num_skills)
                 # Aggregate list of evaluations for each skil
                 eval_infos = []
+                eval_num = epoch // self.cfg.eval_freq
                 render = (
                     self.cfg.eval_video_freq > 0 and
-                    epoch % self.cfg.eval_video_freq == 0
+                    eval_num % self.cfg.eval_video_freq == 0
                 )
                 for skill in range(self.cfg.num_skills):
-                    with self.policy.configure(greedy=True, skill_dist=skill):
+                    with self.policy.configure(greedy=False, skill_dist=skill):
                         eval_info, eval_frames = self.eval_sampler.evaluate(
                             n=self.cfg.eval_size,
                             render=render,
                             render_max=self.cfg.eval_video_length,
-                            render_size=self.cfg.eval_video_size,
+                            render_size=tuple(self.cfg.eval_video_size),
                         )
                     eval_infos.append(eval_info)
                     if not eval_frames is None:
@@ -332,11 +343,11 @@ class DIAYN(agents.Agent):
         Generates losses for the discriminator and the critics
 
         Args:
-            obs (Tensor<N,O>) a batch of obervations, each O floats
-            skills (Tensor<N>) a batch of skills, each a single integer
-            acs (Tensor<N,A>) a batch of actions, each a float
-            next_obs (Tensor<N,O>) a batch of next observations (see obs)
-            dones (Tensor<N>) a batch of done flags, each a single float
+            obs (Tensor<N,O>): A batch of obervations, each O floats
+            skills (Tensor<N>): A batch of skills, each a single integer
+            acs (Tensor<N,A>): A batch of actions, each a float
+            next_obs (Tensor<N,O>): A batch of next observations (see obs)
+            dones (Tensor<N>): A batch of done flags, each a single float
 
         Returns:
             A differentiable discriminator loss (cross entropy),
@@ -402,8 +413,8 @@ class DIAYN(agents.Agent):
         Generates losses for the policy and alpha parameter
 
         Args:
-            obs (Tensor<N,O>) a batch of observations, each O floats
-            skills (Tensor<N>) a batch of skills, each a single integer
+            obs (Tensor<N,O>): A batch of observations, each O floats
+            skills (Tensor<N>): A batch of skills, each a single integer
 
         Returns:
             A differentiable policy_loss, a differentiable (log) alpha loss,
