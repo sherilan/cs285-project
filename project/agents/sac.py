@@ -207,16 +207,8 @@ class SAC(agents.Agent):
             # Sample more steps for this epoch and add to replay buffer
             self.buffer << self.train_sampler.sample_steps(
                 n=self.cfg.num_samples_per_epoch,
-                # random=len(self.buffer) < 10_000
             )
-
-            # Write statistics from training data sampling
-            # data_info = self.buffer.get_info()
-            data_info = {}
-            data_info['BufferSize'] = len(self.buffer)
-            data_info['TotalEnvSteps'] = self.train_sampler.total_steps
-            data_info['Last25TrainRets'] = self.train_sampler.returns[-25:]
-            epoch_logs.add_scalar_dict(data_info, prefix='Data')
+            epoch_logs.add_scalar_dict(self.get_data_info(), prefix='Data')
 
             # Train with data from replay buffer
             for step in range(self.cfg.num_train_steps_per_epoch):
@@ -230,74 +222,49 @@ class SAC(agents.Agent):
                 )
 
                 # Train q functions
-                qf1_loss, qf2_loss, critic_info = self.critic_objective(
+                critic_info = self.update_critics(
                     obs=obs, acs=acs, rews=rews, next_obs=next_obs, dones=dones
-                )
-                critic_info['Qf1GradNorm'] = utils.optimize(
-                    loss=qf1_loss,
-                    optimizer=self.qf1_optimizer,
-                    norm_clip=self.cfg.critic_grad_norm_clip,
-                )
-                critic_info['Qf2GradNorm'] = utils.optimize(
-                    loss=qf2_loss,
-                    optimizer=self.qf2_optimizer,
-                    norm_clip=self.cfg.critic_grad_norm_clip,
                 )
                 epoch_logs.add_scalar_dict(critic_info, prefix='Critic')
 
                 # Train actor and tune temperature
-                policy_loss, alpha_loss, policy_info = self.actor_objective(
-                    obs=obs
-                )
-                policy_info['PolicyGradNorm'] = utils.optimize(
-                    loss=policy_loss,
-                    optimizer=self.policy_optimizer,
-                    norm_clip=self.cfg.policy_grad_norm_clip,
-                )
-                if self.cfg.train_alpha:
-                    utils.optimize(alpha_loss, self.alpha_optimizer)
-                epoch_logs.add_scalar_dict(policy_info, prefix='Actor')
+                actor_info = self.update_actor(obs=obs)
+                epoch_logs.add_scalar_dict(actor_info, prefix='Actor')
 
                 # Apply polyak averaging to target networks
-                utils.polyak(
-                    net=self.qf1, target=self.qf1_target,
-                    tau=self.cfg.target_update_tau
-                )
-                utils.polyak(
-                    net=self.qf2, target=self.qf2_target,
-                    tau=self.cfg.target_update_tau
-                )
+                self.update_targets()
 
             # Eval, on occasions
             if epoch % self.cfg.eval_freq == 0:
-                with self.policy.configure(greedy=True):
-                    eval_num = epoch // self.cfg.eval_freq
-                    render = (
-                        self.cfg.eval_video_freq > 0 and
-                        eval_num % self.cfg.eval_video_freq == 0
-                    )
-                    eval_info, eval_frames = self.eval_sampler.evaluate(
-                        n=self.cfg.eval_size,
-                        render=render,
-                        render_max=self.cfg.eval_video_length,
-                        render_size=tuple(self.cfg.eval_video_size),
-                    )
+                eval_info, eval_frames = self.evaluate(epoch, greedy=True)
                 epoch_logs.add_scalar_dict(
                     eval_info, prefix='Eval', agg=['min', 'max', 'mean']
                 )
                 if not eval_frames is None:
                     epoch_logs.add_video(
-                        name='EvalRollout',
-                        video=eval_frames,
-                        fps=self.cfg.eval_video_fps,
+                        'EvalRollout', eval_frames, fps=self.cfg.eval_video_fps,
                     )
 
             # Write logs
             epoch_logs.dump(step=self.train_sampler.total_steps)
 
-    def critic_objective(self, obs, acs, rews, next_obs, dones):
+    def get_data_info(self, debug=False):
         """
-        Generates losses for the critics
+        Generates diagnostics about the gathered data
+        """
+        info = {}
+        info['BufferSize'] = len(self.buffer)
+        info['TotalEnvSteps'] = self.train_sampler.total_steps
+        info['Last25TrainRets'] = self.train_sampler.returns[-25:]
+        # Optionally add summary statistics about everything in buffer
+        if debug:
+            info.update(self.buffer.get_info())
+
+        return info
+
+    def update_critics(self, obs, acs, rews, next_obs, dones):
+        """
+        Updates parameters of the critics (Q-functions)
 
         Args:
             obs (Tensor<N,O>): A batch of obervations, each O floats
@@ -307,8 +274,7 @@ class SAC(agents.Agent):
             dones (Tensor<N>): A batch of done flags, each a single float
 
         Returns:
-            Differentiable losses (entropy bellman mse) for both critics,
-            and a dictionary with detached diagnostics.
+            A dictionary with diagnostics
         """
         # Make action-value predictions with both q-functions
         q1_pred = self.qf1(obs, acs)
@@ -334,22 +300,36 @@ class SAC(agents.Agent):
             q_target = rews + (1. - dones) * self.cfg.gamma * target_q_values
 
 
-        # Minimize squared distance
-        qf1_mse = F.mse_loss(q1_pred, q_target)
-        qf2_mse = F.mse_loss(q2_pred, q_target)
+        # Use mean squared error as loss
+        qf1_loss = F.mse_loss(q1_pred, q_target)
+        qf2_loss = F.mse_loss(q2_pred, q_target)
+
+        # And minimize it
+        qf1_grad_norm = utils.optimize(
+            loss=qf1_loss,
+            optimizer=self.qf1_optimizer,
+            norm_clip=self.cfg.critic_grad_norm_clip,
+        )
+        qf2_grad_norm = utils.optimize(
+            loss=qf2_loss,
+            optimizer=self.qf2_optimizer,
+            norm_clip=self.cfg.critic_grad_norm_clip,
+        )
 
         # Diagonstics
         info = {}
         info['QTarget'] = q_target.mean().detach()
         info['QAbsDiff'] = (q1_pred - q2_pred).abs().mean().detach()
-        info['Qf1Loss'] = qf1_mse.detach()
-        info['Qf2Loss'] = qf2_mse.detach()
+        info['Qf1Loss'] = qf1_loss.detach()
+        info['Qf2Loss'] = qf2_loss.detach()
+        info['Qf1GradNorm'] = qf1_grad_norm
+        info['Qf2GradNorm'] = qf2_grad_norm
 
-        return qf1_mse, qf2_mse, info
+        return info
 
-    def actor_objective(self, obs):
+    def update_actor(self, obs):
         """
-        Generates losses for the policy and alpha parameter
+        Updates parameters for the policy (and possibly alpha)
 
         Args:
             obs (Tensor<N,O>): A batch of observations, each O floats
@@ -370,19 +350,67 @@ class SAC(agents.Agent):
         # Climb the gradient of the (lower) q-function and add entropy bonus
         # -> loss is negative q + negative entropy
         policy_loss = (self.alpha * log_prob - q_values).mean()
+        policy_grad_norm = utils.optimize(
+            loss=policy_loss,
+            optimizer=self.policy_optimizer,
+            norm_clip=self.cfg.policy_grad_norm_clip,
+        )
 
         # Generate a loss for the alpha value
         target_entropy_plus_logp = log_prob.detach() + self.target_entropy
         alpha_loss = (-self.log_alpha * target_entropy_plus_logp).mean()
 
+        # But only optimize it if configured
+        if self.cfg.train_alpha:
+            utils.optimize(alpha_loss, self.alpha_optimizer)
+
         # Diagnostics
         info = {}
         info['Entropy'] = -log_prob.mean().detach()
         info['PolicyLoss'] = policy_loss.detach()
+        info['PolicyGradNorm'] = policy_grad_norm
         info['AlphaLoss'] = alpha_loss.detach()
         info['AlphaValue'] = self.alpha
 
-        return policy_loss, alpha_loss, info
+        return info
+
+    def update_targets(self):
+        """
+        Applies polyak averaging to the target network of both q-functions
+        """
+        utils.polyak(
+            net=self.qf1, target=self.qf1_target,
+            tau=self.cfg.target_update_tau
+        )
+        utils.polyak(
+            net=self.qf2, target=self.qf2_target,
+            tau=self.cfg.target_update_tau
+        )
+
+    def evaluate(self, epoch=None, render=False, greedy=True):
+        """Evaluates the current policy"""
+        # Determine whether we should render for this epoch
+        if render:
+            render = True
+        elif epoch is None:
+            render = False
+        elif self.cfg.eval_video_freq <= 0:
+            render = False
+        else:
+            eval_num = epoch // self.cfg.eval_freq
+            render = eval_num % self.cfg.eval_video_freq == 0
+
+        # Rollout
+        with self.policy.configure(greedy=greedy):
+            info, frames = self.eval_sampler.evaluate(
+                n=self.cfg.eval_size,
+                render=render,
+                render_max=self.cfg.eval_video_length,
+                render_size=tuple(self.cfg.eval_video_size),
+            )
+
+        return info, frames
+
 
 
 
