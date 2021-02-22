@@ -72,6 +72,10 @@ class EpochLogs:
         finally:
             self.pop_prefix(len(prefixes))
 
+    def add_videos(self, name, videos, **video_kwargs):
+        for video in videos:
+            self.add_video(name, video, **video_kwargs)
+
     def add_video(self, name, video, **video_kwargs):
         if self.prefixes:
             name = f'{"/".join(self.prefixes)}/{name}'
