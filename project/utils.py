@@ -52,9 +52,17 @@ def make_env(name):
         warnings.filterwarnings(
             "ignore", message="^.*Box bound precision lowered.*$"
         )
-        return garage.envs.GarageEnv(
+        env = garage.envs.GarageEnv(
             garage.envs.normalize(gym.make(name))
         )
+    # Generate random seed for env.
+    # Assuming np has been seeded, this makes everything reproducible
+    env.seed(np.random.randint(1 << 32))
+    env.action_space.seed(np.random.randint(1 << 32))
+    env.observation_space.seed(np.random.randint(1 << 32))
+    return env
+
+
 
 def to_one_hot(indices, n):
     indices = torch.as_tensor(indices, dtype=torch.int64)
