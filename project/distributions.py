@@ -16,7 +16,7 @@ class PolicyDistribution:
 
 
     def sample_with_log_prob(self, greedy=False, grad=False):
-        action = self.rsample(greedy=greedy, grad=grad)
+        action = self.sample(greedy=greedy, grad=grad)
         logp = self.log_prob(action)
         return action, logp
 
@@ -52,6 +52,9 @@ class Gaussian(PolicyDistribution):
 
 
 class TanhGaussian(Gaussian):
+
+    # TODO: Clean up to look more like TanhGMM
+    #       I just don't want to touch anything right now
 
     def __init__(self, *args, use_spinup_logp=True, **kwargs):
         super().__init__(*args, **kwargs)
@@ -128,3 +131,146 @@ class TanhGaussian(Gaussian):
             - F.softplus(-2 * action_pre_tanh)
         )
         return logp_gaus - log_det_da_du.sum(dim=-1)
+
+
+
+class GMM(PolicyDistribution):
+
+    def __init__(self, logits, means, logstds):
+        self.logits = logits
+        self.means = means
+        self.logstds = logstds
+        self.mixture = torch.distributions.MixtureSameFamily(
+            mixture_distribution=torch.distributions.Categorical(
+                probs=torch.softmax(logits, dim=-1)
+            ),
+            component_distribution=torch.distributions.Independent(
+                torch.distributions.Normal(means, logstds.exp()),
+                reinterpreted_batch_ndims=1,
+            ),
+        )
+
+    @property
+    def b_dim(self):
+        return self.means.shape[:-2]
+
+    @property
+    def k_dim(self):
+        return self.means.shape[-2]
+
+    @property
+    def x_dim(self):
+        return self.means.shape[-1]
+
+    def sample(self, greedy=False, grad=False):
+
+        if grad:
+            raise NotImplementedError('Cannot r-sample GMM')
+
+        if greedy:
+            # Select component with highest probability and flatten to 2D
+            k = self.logits.reshape(-1, self.k_dim).argmax(dim=-1)  # (|b_dim|)
+            m = self.means.reshape(-1, self.x_dim) # (|b_dim| * k_dim, x_dim )
+            # Map k to correct index in m
+            i = k + torch.arange(int(np.prod(self.b_dim)), device=k.device) * self.k_dim
+            return m[i].reshape(self.b_dim + (self.x_dim,)).detach()
+        else:
+            # Just sample
+            return self.mixture.sample()
+
+    def log_prob(self, action):
+        return self.mixture.log_prob(action)
+
+    def reg_loss(self):
+        """Regularization loss for the gaussians"""
+        loss = 0
+        loss += 0.5 * (self.means ** 2).mean()
+        loss += 0.5 * (self.logstds ** 2).mean()
+        return loss
+
+
+class TanhGMM(GMM):
+    """GMM, except with a tanh squeeze"""
+
+    def __init__(self, *args, use_spinup_logp=True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.use_spinup_logp = use_spinup_logp
+
+    def sample(self, greedy=False, grad=False):
+        return torch.tanh(super().sample(greedy=greedy, grad=grad))
+
+    def log_prob(self, action):
+        """
+        WARNING: be careful with this one due to inverting tanh
+        """
+        # Calculate pre_tanh action with arctanh
+        action = action.detach()
+        action_pre_tanh = torch.log((1 + action) / (1 - action)) / 2
+        logp_pre_tanh = super().log_prob(action_pre_tanh)
+        logp = logp_pre_tanh + self.logp_correction(action_pre_tanh)
+        return logp
+
+    def sample_with_log_prob(self, greedy=False, grad=False, pre_tanh=False):
+        """
+        Samples actions and returns it with its log prob
+        Calculating the logp before the tanh greatly helps
+        with numerical stability (so we don't have to arctan).
+        """
+        # Sample action and compute logp, both before and after tanh squeeze
+        action_pre_tanh = super().sample(greedy=greedy, grad=grad)
+        action = torch.tanh(action_pre_tanh)
+        logp_pre_tanh = super().log_prob(action_pre_tanh)
+        logp = logp_pre_tanh + self.logp_correction(action_pre_tanh)
+        # Optionally return all 4 quantities (needed for vanilla sac)
+        if pre_tanh:
+            return action, logp, action_pre_tanh, logp_pre_tanh
+        else:
+            return action, logp
+
+    def logp_correction(self, action_pre_tanh):
+        """Get the correction term for logp after tanh sqeeze"""
+        if self.use_spinup_logp:
+            return tanh_logp_correction_sac(action_pre_tanh)
+        else:
+            return tanh_logp_correction_spinup(action_pre_tanh)
+
+
+def tanh_logp_correction_sac(action_pre_tanh):
+    """
+    Computes the logp correction term for a = tanh(p(u|s))
+
+    (From SAC Paper appendix C)
+
+    Given action a = tanh(u), where u~N(u|s). The density is given by:
+    - pi(a|s) = N(u|s) * |det(da/du)|^-1
+    The jacobian of the element-wise tanh is diag(1 - tanh^2(u)), so:
+    - pi(a|s) = N(u|s) * PROD_i[1 - tanh^2(u_i)]
+    Which, when taking the logarithm, becomes:
+    - log(pi(a|s)) = log(N(u|s)) + SUM_i[log(1 - tanh^2(u_i))]
+
+    This function computes the SUM_i[log(1 - tanh^2(u_i))] part
+    """
+    # Compute elementwise da_du (action = tanh(u))
+    da_du = 1 - torch.tanh(action_pre_tanh) ** 2
+    # Use clip trick from garage impl to make sure da_du is in (0,1)
+    # while preserving gradient.
+    clip_hi = (da_du > 1.0).float()
+    clip_lo = (da_du < 0.0).float()
+    with torch.no_grad():
+        clip_diff = (1.0 - da_du) * clip_hi + (0.0 - da_du) * clip_lo
+    da_du_clipped = da_du + clip_diff
+    # Combine: log of product -> sum of logs
+    return - torch.log(da_du_clipped + 1e-6).sum(dim=-1)
+
+def tanh_logp_correction_spinup(action_pre_tanh):
+    """
+    Variation on log_prob_from_pre_tanh_sac sourced from the
+    "Spinning Up" repository that is supposed to be more
+    numerically stable.
+    """
+    corr -2 * (
+        + np.log(2)
+        - action_pre_tanh
+        - F.softplus(-2 * action_pre_tanh)
+    )
+    return corr.squeeze(-1)

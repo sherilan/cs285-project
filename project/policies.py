@@ -157,6 +157,126 @@ class TanhGaussianMLPPolicy(GaussianMLPPolicy):
         return distributions.TanhGaussian(mean, std)
 
 
+
+class GMMMLPPolicy(Policy):
+    """
+    An MLP policy that generates a GMM distribution
+    """
+
+    def __init__(
+        self,
+        ob_dim,
+        ac_dim,
+        num_components=4,
+        static_std=False,
+        init_std=1.0,
+        min_std=np.exp(-20.0),
+        max_std=np.exp(2.0),
+        min_component_prob=np.exp(-10),
+        **mlp_kwargs
+    ):
+        super().__init__()
+        # Unwrap ob|ac_dim if they were given as single-element tuples
+        assert np.isscalar(ob_dim) or len(ob_dim) == 1
+        assert np.isscalar(ac_dim) or len(ac_dim) == 1
+        self.ob_dim = ob_dim if np.isscalar(ob_dim) else ob_dim[0]
+        self.ac_dim = ac_dim if np.isscalar(ac_dim) else ac_dim[0]
+        self.num_components = num_components
+        self.static_std = static_std
+        # Store limits for std
+        if not min_std is None:
+            min_logstd = torch.tensor(min_std).log()
+            self.min_logstd = nn.Parameter(min_logstd, requires_grad=False)
+        else:
+            self.min_logstd = None
+        if not max_std is None:
+            max_logstd = torch.tensor(max_std).log()
+            self.max_logstd = nn.Parameter(max_logstd, requires_grad=False)
+        else:
+            self.max_logstd = None
+        # Store lower limit for mixture probability
+        if not min_component_prob is None:
+            min_component_prob = torch.tensor(min_component_prob).log()
+            self.min_component_prob = nn.Parameter(min_component_prob, requires_grad=False)
+        else:
+            self.min_component_prob = None
+        # Case: static std -> use a simple mlp to predict just the logits and means
+        if static_std:
+            self.base = networks.MultiHeadMLP(
+                input_size=self.ob_dim,
+                output_sizes=[
+                    self.num_components,  # Logits for mixture
+                    self.num_components * self.ac_dim,  # Mean for each component
+                ],
+                output_names=['logits', 'means'],
+                # output_w_init=lambda x: x.data.normal(0, 0.1),
+                **mlp_kwargs
+            )
+            self.logstd = nn.Parameter(torch.ones(self.ac_dim))
+        # Case dynamic std -> use multi-headed mlp to predict logits, means, and log(stds)
+        else:
+            self.base = networks.MultiHeadMLP(
+                input_size=self.ob_dim,
+                output_sizes=[
+                    self.num_components,  # Logits for mixture
+                    self.num_components * self.ac_dim,  # Mean for each component
+                    self.num_components * self.ac_dim,  # Log(std) for each component
+                ],
+                output_names=['logits', 'means', 'logstds'],
+                # output_w_init=lambda x: x.data.normal(0, 0.1),
+                **mlp_kwargs
+            )
+
+    def forward(self, *observations):
+        logits, means, logstds = self.get_logits_means_and_logstds(*observations)
+        return distributions.GMM(logits, means, logstds)
+
+    def get_logits_means_and_logstds(self, *observations):
+        # Compute mean/std depending on whether std is static
+        if self.static_std:
+            logits, means = self.base(*observations)
+            means = self.reshape_components(means)
+            logstds = self.logstd
+        else:
+            logits, means, logstds = self.base(*observations)
+            means = self.reshape_components(means)
+            logstds = self.reshape_components(logstds)
+        # Possibly clamp std based on configured min/max values
+        if self.min_logstd is not None or self.max_logstd is not None:
+            logstds = logstds.clamp(
+                min=None if self.min_logstd is None else self.min_logstd,
+                max=None if self.max_logstd is None else self.max_logstd,
+            )
+        # Possibly clamp logits
+        if self.min_component_prob is not None:
+            logits = logits.clamp(self.min_component_prob)
+        return logits, means, logstds
+
+    def reshape_components(self, components_flat):
+        """
+        Reshapes components to make them ready for the GMM
+
+        The MLP base will return means (and logstds if applicable)
+        on the form <batch..., num_components * ac_dim>. This method
+        reshapes the component to <batch..., num_components, ac_dim>
+        so that they have the right format for GMM distributions
+        """
+        b_dim = components_flat.shape[:-1]  # Get batch dim agnostically
+        out_shape = b_dim + (self.num_components, self.ac_dim)
+        return components_flat.reshape(out_shape)
+
+
+
+class TanhGMMMLPPolicy(GMMMLPPolicy):
+    """A GMMMLPolicy, except that actions are squeezed through a tanh"""
+
+    def forward(self, *observations):
+        logits, means, logstds = self.get_logits_means_and_logstds(*observations)
+        return distributions.TanhGMM(logits, means, logstds)
+
+
+
+
 class SkillConditionedPolicy(Policy):
     """
     Wrapper around any other policy that allows skill conditioning

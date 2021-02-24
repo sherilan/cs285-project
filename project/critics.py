@@ -32,3 +32,24 @@ class QAMLPCritic(Critic):
 
     def forward(self, *x):
         return self.base(*x).squeeze(dim=-1)
+
+
+class MLPBaseline(Critic):
+    """
+    An MLP-based value function
+    """
+
+    def __init__(self, ob_dim, **mlp_kwargs):
+        super().__init__()
+        # Unwrap ob|ac_dim if they were given as single-element tuples
+        assert np.isscalar(ob_dim) or len(ob_dim) == 1
+        self.ob_dim = ob_dim if np.isscalar(ob_dim) else ob_dim[0]
+        # Build MLP base
+        self.base = networks.MLP(
+            input_size=self.ob_dim,
+            output_size=1,
+            **mlp_kwargs
+        )
+
+    def forward(self, *x):
+        return self.base(*x).squeeze(dim=-1)
