@@ -3,10 +3,12 @@ import os
 import pathlib
 import warnings
 
-import garage.envs
 import gym
 import numpy as np
 import torch
+
+import project.envs.normalized_env as normalized_env
+import project.envs.garage_env as garage_env
 
 
 def setup_experiment(path, on_conflict='enumerate'):
@@ -52,8 +54,8 @@ def make_env(name):
         warnings.filterwarnings(
             "ignore", message="^.*Box bound precision lowered.*$"
         )
-        env = garage.envs.GarageEnv(
-            garage.envs.normalize(gym.make(name))
+        env = garage_env.GarageEnv(
+            normalized_env.normalize(gym.make(name))
         )
     # Generate random seed for env.
     # Assuming np has been seeded, this makes everything reproducible
