@@ -11,12 +11,16 @@ import project.utils as utils
 
 
 class Dagger(agents.Agent):
+
     class Config(agents.Agent.Config):
         env = 'HalfCheetah-v2'
         expert_data = None  # << must be set
         expert_data_size = None  # Amount of expert data to use
         expert_policy = None  # << must be set
         num_epochs = 100
+        buffer_capacity = 1_000_000
+        batch_size = 128
+        max_path_length_train = 1000
         num_train_steps_per_epoch = 100
         num_samples_to_collect_per_epoch = 1000  # num trajectories to collect per epoch
 
@@ -44,7 +48,7 @@ class Dagger(agents.Agent):
         ac_dim, = self.ac_dim, = self.env.action_space.shape
 
         # Setup policies
-        self.expert_policy = sac.SAC.restore(self.cfg.expert_policy)  # Expert
+        self.expert_policy = sac.SAC.restore(self.cfg.expert_policy).policy  # Expert
         self.policy = policies.GaussianMLPPolicy(  # Cloned
             ob_dim, ac_dim,
             hidden_num=self.cfg.policy_hidden_num,
@@ -81,7 +85,7 @@ class Dagger(agents.Agent):
         self.buffer = buffers.RingBuffer(
             capacity=int(self.cfg.buffer_capacity),
             keys=['ob', 'ac'],
-            dims=[ob_dim, ac_dim, None, ob_dim, None]
+            dims=[ob_dim, ac_dim]
         )
         self.logger.info('Initialized buffer (%s)', self.buffer)
 
@@ -117,6 +121,7 @@ class Dagger(agents.Agent):
 
             # Aggregate new data
             self.buffer << data
+            epoch_logs.add_scalar_dict(self.get_data_info(), prefix='Data')
 
             # Evaluate at the end of every epoch
             eval_info, eval_frames = self.evaluate(greedy=True)
@@ -179,6 +184,20 @@ class Dagger(agents.Agent):
             self.buffer << path
         self.logger.info('Filled buffer (%s)', self.buffer)
 
+    def get_data_info(self, debug=False):
+        """
+        Generates diagnostics about the gathered data
+        """
+        info = {}
+        info['BufferSize'] = len(self.buffer)
+        info['TotalEnvSteps'] = self.train_sampler.total_steps
+        info['Last25TrainRets'] = self.train_sampler.returns[-25:]
+        # Optionally add summary statistics about everything in buffer
+        if debug:
+            info.update(self.buffer.get_info())
+
+        return info
+
     def update_actor(self, obs, acs):
         """
         Updates parameters for the policy with behavior cloning
@@ -233,8 +252,12 @@ class Dagger(agents.Agent):
         return info, frames
 
     def relabel_with_expert(self, obs):
-        obs = torch.as_tensor(obs, device=self.device)
+        obs = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
         with torch.no_grad():
             pi = self.expert_policy(obs)
             acs = pi.sample(greedy=True)
         return acs.cpu().numpy()
+
+
+if __name__ == '__main__':
+    Dagger.run_cli()
