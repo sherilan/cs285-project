@@ -1,0 +1,8 @@
+gym==0.17.2
+PyYAML==5.4.1
+tensorboardX==1.8
+numpy==1.19.4
+garage==2020.6.3
+opencv-python==4.4.0.42
+mujoco-py==2.0.2.13
+torch==1.7.1
