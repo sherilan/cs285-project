@@ -8,12 +8,12 @@ The [docker](docker) folder comes with a Dockerfile for building an image that s
 - [config.sh](docker/config.sh) contains all configuration variables for the docker suite 
 - [build.sh](docker/build.sh) automates building of the docker image 
 - [run.sh](docker/run.sh) fires up a container, by default with an interactive bash shell. Additionally, it will map ports for notebooks/tensorboard, and mount the mujoco license key and the current codebase.
-- [notebook.sh](docker/notebook.sh) starts a jupyter notbook server in a running container 
-- [tensorboard.sh](docker/tensorboard.sh) starts a tensorboard server in a running container 
+- [notebook.sh](docker/notebook.sh) starts a jupyter notbook server in its own container 
+- [tensorboard.sh](docker/tensorboard.sh) starts a tensorboard server in its own container 
 
 ### Configuration 
 
-Begin by editing [config.sh](docker/config.sh). By default the image name will be set to `<yourusername>/cs285`. Additionally, the path to a valid mujoco license key will default to `~/.mujoco/mjkey`, but you can change it if you keep your license somewhere else. The configuration for mapped ports (`tb_port` and `nb_port`) tells the [run.sh](docker/run.sh) script how to map ports from the host machine and into the container. By default, they will map 6006:6006 (for tensorboard) and 8888:8888 (for notebooks), but if you're on a shared system, you should consider changing the host values to someting else to avoid conflicts. Finally, the gpu arguments will tell docker which gpus that should be exposed when running a container.
+Begin by editing [config.sh](docker/config.sh). By default the image name will be set to `<yourusername>/cs285`. Additionally, the path to a valid mujoco license key will default to `~/.mujoco/mjkey`, but you can change it if you keep your license somewhere else. The configuration for mapped ports (`tb_port` and `nb_port`) determines which ports (on the host machine) that will be used for tensorboard and jupyter notebooks. By default, they will map 6006:6006 (for tensorboard) and 8888:8888 (for notebooks), but if you're on a shared system, you should consider changing them to someting else to avoid conflicts. Finally, the gpu arguments will tell docker which gpus that should be exposed when running a container.
 
 **Note**: The mujoco key must come from an institutional license since personal (hardware-bound) licenses currently don't work within docker. 
 
