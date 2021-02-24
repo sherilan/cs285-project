@@ -1,34 +1,24 @@
-
-
-
-import copy
 import pickle
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 import project.agents as agents
-import project.policies as policies
-import project.networks as networks
-import project.utils as utils
-import project.critics as critics
+import project.agents.sac as sac
 import project.buffers as buffers
+import project.policies as policies
 import project.samplers as samplers
-import project.normalizers as normalizers
+import project.utils as utils
 
 
-class BC(agents.Agent):
-
+class Dagger(agents.Agent):
     class Config(agents.Agent.Config):
-
-        # -- General
         env = 'HalfCheetah-v2'
-        expert_data = None # << Must be set
+        expert_data = None  # << must be set
         expert_data_size = None  # Amount of expert data to use
+        expert_policy = None  # << must be set
         num_epochs = 100
         num_train_steps_per_epoch = 100
-        batch_size = 128
+        num_samples_to_collect_per_epoch = 1000  # num trajectories to collect per epoch
 
         # -- Evaluation
         eval_size = 10_000
@@ -44,78 +34,89 @@ class BC(agents.Agent):
         policy_hidden_act = 'relu'
         policy_optimizer = 'adam'
         policy_lr = 1e-3
-        policy_grad_norm_clip = None #10.0
-
-
+        policy_grad_norm_clip = None  # 10.0
 
     def init(self):
-        """
-        Initializes the SAC agent by setting up
-            - An MLP-based tanh gaussian policy
-            - Optimizer for policy
-        """
         # Initialize environment to get input/output dimensions
-        self.eval_env = utils.make_env(self.cfg.env)
-        ob_dim, = self.ob_dim, = self.eval_env.observation_space.shape
-        ac_dim, = self.ac_dim, = self.eval_env.action_space.shape
-        # Setup policy
-        self.policy = policies.GaussianMLPPolicy(
+        self.train_env = utils.make_env(self.cfg.env)
+        self.env = utils.make_env(self.cfg.env)
+        ob_dim, = self.ob_dim, = self.env.observation_space.shape
+        ac_dim, = self.ac_dim, = self.env.action_space.shape
+
+        # Setup policies
+        self.expert_policy = sac.SAC.restore(self.cfg.expert_policy)  # Expert
+        self.policy = policies.GaussianMLPPolicy(  # Cloned
             ob_dim, ac_dim,
             hidden_num=self.cfg.policy_hidden_num,
             hidden_size=self.cfg.policy_hidden_size,
             hidden_act=self.cfg.policy_hidden_act,
             static_std=True,
         )
-        # And send to correct device
+
+        # Send policies to device
         self.to(self.device)
+
         # Setup optimizer
         self.policy_optimizer = utils.get_optimizer(
             name=self.cfg.policy_optimizer,
             params=self.policy.parameters(),
             lr=self.cfg.policy_lr,
         )
+
+        # Setup samplers
+        self.train_sampler = samplers.Sampler(
+            env=self.train_env,
+            policy=self.policy,
+            max_steps=self.cfg.max_path_length_train
+        )
+
         # Create sampler for evaluations
         self.eval_sampler = samplers.Sampler(
-            env=self.eval_env,
+            env=self.env,
             policy=self.policy,
             max_steps=self.cfg.max_path_length_eval
         )
-        # Placeholder for replay buffer
-        self.buffer = None
 
+        # Setup replay buffer
+        self.buffer = buffers.RingBuffer(
+            capacity=int(self.cfg.buffer_capacity),
+            keys=['ob', 'ac'],
+            dims=[ob_dim, ac_dim, None, ob_dim, None]
+        )
+        self.logger.info('Initialized buffer (%s)', self.buffer)
 
     def train(self):
-        """
-        Trains the SAC agent with the following procedure:
-        - Load initial data
-        - Loop for the configured number of epochs:
-            - Train on expert data
-            - Evaluate policy
-        """
         # Initialize buffer with expert data
         self.logger.info('Procuring expert data')
         self.load_expert_data()
 
         self.logger.info('Begin training')
+
         for epoch in range(1, self.cfg.num_epochs):
 
             # Create a logger for dumping diagnostics
             epoch_logs = self.logger.epoch_logs(epoch)
 
-            # Train to match expert data
-            for step in range(self.cfg.num_train_steps_per_epoch):
-
+            for steps in range(self.cfg.num_train_steps_per_epoch):
                 # Sample expert data from buffer
                 obs, acs = self.buffer.sample(
                     self.cfg.batch_size,
                     tensor=True,
                     device=self.device,
-                    as_dict=False,
-                )
+                    as_dict=False)
 
                 # Train policy
                 actor_info = self.update_actor(obs, acs)
-                epoch_logs.add_scalar_dict(actor_info, prefix='Actor')
+                epoch_logs.add_scalar_dict(actor_info, prefix="Actor")
+
+            # Sample new trajectories
+            data = self.train_sampler.sample_steps(self.cfg.num_samples_to_collect_per_epoch)
+
+            # Relabel with expert
+            data['ac'] = self.relabel_with_expert(data["ob"])
+
+            # Aggregate new data
+            self.buffer << data
 
             # Evaluate at the end of every epoch
             eval_info, eval_frames = self.evaluate(greedy=True)
@@ -146,10 +147,10 @@ class BC(agents.Agent):
             expert_data = self.cfg.expert_data
         # Assert that it is a list of dicts
         if (
-            not isinstance(expert_data, (list, tuple)) or
-            not len(expert_data) or
-            not all(isinstance(path, dict) for path in expert_data) or
-            any({'ob', 'ac'} - set(path) for path in expert_data)
+                not isinstance(expert_data, (list, tuple)) or
+                not len(expert_data) or
+                not all(isinstance(path, dict) for path in expert_data) or
+                any({'ob', 'ac'} - set(path) for path in expert_data)
         ):
             raise ValueError(
                 'Expert data must be a non-empty list of dicts with'
@@ -172,14 +173,8 @@ class BC(agents.Agent):
             else:
                 raise ValueError('Not enough expert data!')
             expert_data = expert_data_filtered
-        # Initialize buffer
-        self.buffer = buffers.RingBuffer(
-            capacity=sum(len(path['ob']) for path in expert_data),
-            keys=[ 'ob', 'ac'],
-            dims=[ self.ob_dim, self.ac_dim],
-        )
-        self.logger.info('Initialized buffer (%s)', self.buffer)
-        # And fill it
+
+        # Fill buffer
         for path in expert_data:
             self.buffer << path
         self.logger.info('Filled buffer (%s)', self.buffer)
@@ -237,12 +232,9 @@ class BC(agents.Agent):
 
         return info, frames
 
-
-
-
-
-
-
-
-if __name__ == '__main__':
-    BC.run_cli()
+    def relabel_with_expert(self, obs):
+        obs = torch.as_tensor(obs, device=self.device)
+        with torch.no_grad():
+            pi = self.expert_policy(obs)
+            acs = pi.sample(greedy=True)
+        return acs.cpu().numpy()
