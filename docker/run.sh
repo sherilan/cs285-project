@@ -21,12 +21,11 @@ else
   echo "Executing custom command: $cmd"
 fi
 
+# Get extra docker args specified by caller
+docker_args=$DOCKER_ARGS
+
 # Generate docker command
-docker run --rm -it \
-  --name $container \
-  --gpus $gpus \
-  -p $tb_port:6006 \
-  -p $nb_port:8888 \
+docker run --rm -it --gpus $gpus \
   -v $mjkey:/root/.mujoco/mjkey.txt \
   -v $dir/..:/workspace \
-  $image $cmd
+  $docker_args $image $cmd
