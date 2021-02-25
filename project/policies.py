@@ -284,7 +284,7 @@ class GMMMLPPolicy(Policy):
                    .reshape(obs.shape[:-1] + (nc,) + obs.shape[-1:])
                 for obs in observations
             )
-            return self.qf(observations + (means,))
+            return self.qf(*(observations_repeated + (means,)))
 
 
 
