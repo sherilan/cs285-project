@@ -173,6 +173,7 @@ class GMMMLPPolicy(Policy):
         min_std=np.exp(-20.0),
         max_std=np.exp(2.0),
         min_component_prob=np.exp(-10),
+        qf=None,
         **mlp_kwargs
     ):
         super().__init__()
@@ -183,6 +184,7 @@ class GMMMLPPolicy(Policy):
         self.ac_dim = ac_dim if np.isscalar(ac_dim) else ac_dim[0]
         self.num_components = num_components
         self.static_std = static_std
+        self.qf = qf
         # Store limits for std
         if not min_std is None:
             min_logstd = torch.tensor(min_std).log()
@@ -229,7 +231,8 @@ class GMMMLPPolicy(Policy):
 
     def forward(self, *observations):
         logits, means, logstds = self.get_logits_means_and_logstds(*observations)
-        return distributions.GMM(logits, means, logstds)
+        q_values = self.get_q_values(observations, means)
+        return distributions.GMM(logits, means, logstds, q_values=q_values)
 
     def get_logits_means_and_logstds(self, *observations):
         # Compute mean/std depending on whether std is static
@@ -265,6 +268,24 @@ class GMMMLPPolicy(Policy):
         out_shape = b_dim + (self.num_components, self.ac_dim)
         return components_flat.reshape(out_shape)
 
+    def get_q_values(self, observations, means):
+        """
+        Generates q-values for the means of each component.
+        This is used by the GMM to generate greedy actions that maximize Q.
+        """
+        # Ignore if no q-function is provided
+        if self.qf is None:
+            return None
+        # Otherwise, generate a q-value for every component mean
+        else:
+            nc = self.num_components
+            observations_repeated = tuple(
+                obs.repeat((1,) * (len(means.size()) -1) + (nc,))
+                   .reshape(obs.shape[:-1] + (nc,) + obs.shape[-1:])
+                for obs in observations
+            )
+            return self.qf(observations + (means,))
+
 
 
 class TanhGMMMLPPolicy(GMMMLPPolicy):
@@ -272,7 +293,8 @@ class TanhGMMMLPPolicy(GMMMLPPolicy):
 
     def forward(self, *observations):
         logits, means, logstds = self.get_logits_means_and_logstds(*observations)
-        return distributions.TanhGMM(logits, means, logstds)
+        q_values = None if self.qf is None else self.get_q_values(observations, means)
+        return distributions.TanhGMM(logits, means, logstds, q_values=q_values)
 
 
 

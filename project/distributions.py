@@ -136,10 +136,11 @@ class TanhGaussian(Gaussian):
 
 class GMM(PolicyDistribution):
 
-    def __init__(self, logits, means, logstds):
+    def __init__(self, logits, means, logstds, q_values=None):
         self.logits = logits
         self.means = means
         self.logstds = logstds
+        self.q_values = q_values
         self.mixture = torch.distributions.MixtureSameFamily(
             mixture_distribution=torch.distributions.Categorical(
                 probs=torch.softmax(logits, dim=-1)
@@ -168,8 +169,12 @@ class GMM(PolicyDistribution):
             raise NotImplementedError('Cannot r-sample GMM')
 
         if greedy:
-            # Select component with highest probability and flatten to 2D
-            k = self.logits.reshape(-1, self.k_dim).argmax(dim=-1)  # (|b_dim|)
+            # Case: no q-values -> select component with highest mixture prob
+            if self.q_values is None:
+                k = self.logits.reshape(-1, self.k_dim).argmax(dim=-1)  # (|b_dim|)
+            # Case: q-values -> select component with highest q-value
+            else:
+                k = self.q_values.reshape(-1, self.k_dim).argmax(dim=-1)
             m = self.means.reshape(-1, self.x_dim) # (|b_dim| * k_dim, x_dim )
             # Map k to correct index in m
             i = k + torch.arange(int(np.prod(self.b_dim)), device=k.device) * self.k_dim
