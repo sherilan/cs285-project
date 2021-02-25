@@ -334,13 +334,29 @@ class SACGMM(agents.Agent):
         # Bootstrap target from next observation
         with torch.no_grad():
 
-            # Train against baseline estimate of value in next state
-            # It should already have the entropy-bonus baked in, so no
-            # need to include it here.
-            v_values = self.baseline(next_obs)
+            # # Train against baseline estimate of value in next state
+            # # It should already have the entropy-bonus baked in, so no
+            # # need to include it here.
+            # v_values = self.baseline(next_obs)
+            #
+            # # Combine with rewards using the Bellman recursion
+            # q_target = rews + (1. - dones) * self.cfg.gamma * v_values
+
+            # Sample actions and their log probabilities at next step
+            pi = self.policy(next_obs)
+            next_acs, next_acs_logp = pi.sample_with_log_prob()
+
+            # Select the smallest estimate of action-value in the next step
+            target_q_values_raw = torch.min(
+                self.qf1_target(next_obs, next_acs),
+                self.qf2_target(next_obs, next_acs),
+            )
+
+            # And add the weighted entropy bonus (negative log)
+            target_q_values = target_q_values_raw - self.alpha * next_acs_logp
 
             # Combine with rewards using the Bellman recursion
-            q_target = rews + (1. - dones) * self.cfg.gamma * v_values
+            q_target = rews + (1. - dones) * self.cfg.gamma * target_q_values
 
 
         # Use mean squared error as loss
