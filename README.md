@@ -7,7 +7,7 @@ The [docker](docker) folder comes with a Dockerfile for building an image that s
 
 - [config.sh](docker/config.sh) contains all configuration variables for the docker suite 
 - [build.sh](docker/build.sh) automates building of the docker image 
-- [run.sh](docker/run.sh) fires up a container, by default with an interactive bash shell. Additionally, it will map ports for notebooks/tensorboard, and mount the mujoco license key and the current codebase.
+- [run.sh](docker/run.sh) starts a container from the built image
 - [notebook.sh](docker/notebook.sh) starts a jupyter notbook server in its own container 
 - [tensorboard.sh](docker/tensorboard.sh) starts a tensorboard server in its own container 
 
