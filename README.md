@@ -34,7 +34,7 @@ To start a container from the image you just built, execute
 ./docker/run.sh <command -arg1 --arg2 ...>
 ```
 
-If no command is provided, you will simply get an interactive bash shell. Once the command has completed (e.g. logout for the bash shell), the container will shut down and be deleted. Note that this script will also mount the root directory of this repository into the `/workspace` folder of the container. That means that any change in code on the host machine will be immediately reflected in the container and any data written in the `/workspace` folder of the container will persist on the host after the container has been deleted.
+If no command is provided, you will simply get an interactive bash shell. Once the command has completed (e.g. logout for the bash shell), the container will shut down and be deleted. Note that this script will also mount the root directory of this repository into the `/workspace` folder of the container. That means that any change in code on the host machine will be immediately reflected in the container, and any data written in the `/workspace` folder of the container will persist on the host after the container has been deleted.
 
 
 ### Tensorboard and jupyter 
@@ -53,7 +53,7 @@ And to start a notebook server, execute:
 ./docker/notebook.sh
 ```
 
-Once either is running, you should be able to connect to them from `localhost:<tb_port>` or `localhost:<nb_port>` (as given by [config.sh](docker/config.sh). If you're running docker on a remote machine, traffic at the ports can be forwarded over ssh by using the `-L` option during login:
+Once either is running, you should be able to connect to them from `localhost:<tb_port>` or `localhost:<nb_port>` (as given by [config.sh](docker/config.sh)). If you're running docker on a remote machine, traffic at the ports can be forwarded over ssh by using the `-L` option during login:
 
 ```
 ssh -L <local_port1>:localhost:<tb_port> -L <local_port2>:localhost:<nb_port> username@host
