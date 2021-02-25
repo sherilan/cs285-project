@@ -26,6 +26,6 @@ docker_args=$DOCKER_ARGS
 
 # Generate docker command
 docker run --rm -it --gpus $gpus \
-  -v $mjkey:/root/.mujoco/mjkey.txt \
+  -v $mj_key:/root/.mujoco/mjkey.txt \
   -v $dir/..:/workspace \
   $docker_args $image $cmd
