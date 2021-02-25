@@ -21,7 +21,7 @@ import project.envs as envs
 
 class DIAYN(agents.Agent):
 
-    class Config(agents.Agent.Config):
+    class ConfigX(agents.Agent.Config):
 
         # -- General
         env = 'HalfCheetah-v2'
@@ -32,12 +32,12 @@ class DIAYN(agents.Agent):
         num_train_steps_per_epoch = 500
         batch_size = 128
         buffer_capacity = 1_000_000
-        min_buffer_size = 10_000  # Min samples in replay buffer before training starts
+        min_buffer_size = 1_000  # Min samples in replay buffer before training starts
         max_path_length_train = 1_000
 
         # -- Evaluation
         eval_freq = 100
-        eval_size = 10_000
+        eval_size = 1_000
         eval_video_freq = -1
         eval_video_length = 200  # Max length for eval video
         eval_video_size = [100, 100]
@@ -68,6 +68,66 @@ class DIAYN(agents.Agent):
         critic_hidden_size = WIDTH
         critic_hidden_act = 'relu'
         target_update_tau = 5e-3  # Strength of target network polyak averaging
+        target_update_freq = 1  # How often to update the target networks
+        critic_optimizer = 'adam'
+        critic_lr = LR
+        critic_grad_norm_clip = None #20.0
+
+        # -- Temperature
+        alpha_initial = 0.1
+        target_entropy = None  # Will be inferred from action space if None
+        alpha_optimizer = 'adam'
+        alpha_lr = LR
+        train_alpha = False # Disable training of alpha if this is set
+
+    class Config(agents.Agent.Config):
+
+        # -- General
+        env = 'HalfCheetah-v2'
+        num_skills = 50
+        gamma = 0.99  # Discount factor
+        num_epochs = 10_000
+        num_samples_per_epoch = 1000
+        num_train_steps_per_epoch = 1000
+        batch_size = 128
+        buffer_capacity = 10_000_000
+        min_buffer_size = 10_000  # Min samples in replay buffer before training starts
+        max_path_length_train = 1_000
+        log_freq = 1
+
+        # -- Evaluation
+        eval_freq = 100
+        eval_size = 1_000
+        eval_video_freq = -1
+        eval_video_length = 100  # Max length for eval video
+        eval_video_size = [100, 100]
+        eval_video_fps = 10
+        max_path_length_eval = 1_000
+
+        LR = 3e-4
+        WIDTH = 300
+
+        # -- Policy
+        policy_hidden_num = 2
+        policy_hidden_size = WIDTH
+        policy_hidden_act = 'relu'
+        policy_optimizer = 'adam'
+        policy_lr = LR
+        policy_grad_norm_clip = None #10.0
+
+        # -- Discriminator
+        clf_hidden_num = 2
+        clf_hidden_size = WIDTH
+        clf_hidden_act = 'relu'
+        clf_optimizer = 'adam'
+        clf_lr = LR
+        clf_grad_norm_clip = None #20.0
+
+        # -- Critic
+        critic_hidden_num = 2
+        critic_hidden_size = WIDTH
+        critic_hidden_act = 'relu'
+        target_update_tau = 0.01  # Strength of target network polyak averaging
         target_update_freq = 1  # How often to update the target networks
         critic_optimizer = 'adam'
         critic_lr = LR
@@ -239,13 +299,7 @@ class DIAYN(agents.Agent):
             self.buffer << self.train_sampler.sample_steps(
                 n=self.cfg.num_samples_per_epoch,
             )
-
-            # Write statistics from training data sampling
-            data_info = {}
-            data_info['BufferSize'] = len(self.buffer)
-            data_info['TotalEnvSteps'] = self.train_sampler.total_steps
-            data_info['Last25TrainRets'] = self.train_sampler.returns[-25:]
-            epoch_logs.add_scalar_dict(data_info, prefix='Data')
+            epoch_logs.add_scalar_dict(self.get_data_info(), prefix='Data')
 
             # Train with data from replay buffer
             for step in range(self.cfg.num_train_steps_per_epoch):
@@ -258,89 +312,90 @@ class DIAYN(agents.Agent):
                     as_dict=False,
                 )
 
+                # Train discriminator
+                disc_info = self.update_disc(obs=obs, skills=skills)
+                epoch_logs.add_scalar_dict(disc_info, prefix='Disc')
+
                 # Train q functions
-                clf_loss, qf1_loss, qf2_loss, critic_info = self.critic_objective(
+                critic_info = self.update_critics(
                     obs=obs, skills=skills, acs=acs, next_obs=next_obs, dones=dones
-                )
-                critic_info['ClfGradNorm'] = utils.optimize(
-                    loss=clf_loss,
-                    optimizer=self.clf_optimizer,
-                    norm_clip=self.cfg.clf_grad_norm_clip,
-                )
-                critic_info['Qf1GradNorm'] = utils.optimize(
-                    loss=qf1_loss,
-                    optimizer=self.qf1_optimizer,
-                    norm_clip=self.cfg.critic_grad_norm_clip,
-                )
-                critic_info['Qf2GradNorm'] = utils.optimize(
-                    loss=qf2_loss,
-                    optimizer=self.qf2_optimizer,
-                    norm_clip=self.cfg.critic_grad_norm_clip,
                 )
                 epoch_logs.add_scalar_dict(critic_info, prefix='Critic')
 
                 # Train actor and tune temperature
-                policy_loss, alpha_loss, policy_info = self.actor_objective(
-                    obs=obs, skills=skills,
-                )
-                policy_info['PolicyGradNorm'] = utils.optimize(
-                    loss=policy_loss,
-                    optimizer=self.policy_optimizer,
-                    norm_clip=self.cfg.policy_grad_norm_clip,
-                )
-                if self.cfg.train_alpha:
-                    utils.optimize(alpha_loss, self.alpha_optimizer)
-                epoch_logs.add_scalar_dict(policy_info, prefix='Actor')
+                actor_info = self.update_actor(obs=obs, skills=skills)
+                epoch_logs.add_scalar_dict(actor_info, prefix='Actor')
 
                 # Apply polyak averaging to target networks
-                utils.polyak(
-                    net=self.qf1, target=self.qf1_target,
-                    tau=self.cfg.target_update_tau
-                )
-                utils.polyak(
-                    net=self.qf2, target=self.qf2_target,
-                    tau=self.cfg.target_update_tau
-                )
+                self.update_targets()
 
-            # Eval, on occasions, but for every skill
+            # Eval, on occasions
             if epoch % self.cfg.eval_freq == 0:
                 self.logger.info('Evaluating %s skills', self.cfg.num_skills)
-                # Aggregate list of evaluations for each skil
-                eval_infos = []
-                eval_num = epoch // self.cfg.eval_freq
-                render = (
-                    self.cfg.eval_video_freq > 0 and
-                    eval_num % self.cfg.eval_video_freq == 0
-                )
-                for skill in range(self.cfg.num_skills):
-                    with self.policy.configure(greedy=False, skill_dist=skill):
-                        eval_info, eval_frames = self.eval_sampler.evaluate(
-                            n=self.cfg.eval_size,
-                            render=render,
-                            render_max=self.cfg.eval_video_length,
-                            render_size=tuple(self.cfg.eval_video_size),
-                        )
-                    eval_infos.append(eval_info)
-                    if not eval_frames is None:
-                        epoch_logs.add_video(
-                            name='EvalRollout',
-                            video=eval_frames,
-                            fps=self.cfg.eval_video_fps,
-                        )
-                # Combine: list of dicts of lists -> dict of lists
-                eval_infos = {
-                    k: functools.reduce(operator.add, (i[k] for i in eval_infos))
-                    for k in eval_infos[0]
-                }
+                eval_info, eval_frames = self.evaluate(epoch, greedy=False)
                 epoch_logs.add_scalar_dict(
-                    eval_infos, prefix='Eval', agg=['min', 'max', 'mean']
+                    eval_info, prefix='Eval', agg=['min', 'max', 'mean']
                 )
-            # Write logs
-            epoch_logs.dump(step=self.train_sampler.total_steps)
+                if eval_frames:
+                    epoch_logs.add_videos(
+                        'EvalRollout', eval_frames, fps=self.cfg.eval_video_fps
+                    )
 
-    def critic_objective(self, obs, skills, acs, next_obs, dones):
+            # Write logs
+            if (
+                epoch % self.cfg.log_freq == 0 or
+                epoch % self.cfg.eval_freq == 0
+            ):
+                epoch_logs.dump(step=self.train_sampler.total_steps)
+
+
+    def get_data_info(self, debug=False):
         """
-        Generates losses for the discriminator and the critics
+        Generates diagnostics about the gathered data
+        """
+        info = {}
+        info['BufferSize'] = len(self.buffer)
+        info['TotalEnvSteps'] = self.train_sampler.total_steps
+        info['Last25TrainRets'] = self.train_sampler.returns[-25:]
+        # Optionally add summary statistics about everything in buffer
+        if debug:
+            info.update(self.buffer.get_info())
+
+        return info
+
+    def update_disc(self, obs, skills):
+        """
+        Updates parameters of the discriminator (classifier)
+
+        Args:
+            obs (Tensor<N,O>): A batch of obervations, each O floats
+            skills (Tensor<N>): A batch of skills, each a single integer
+
+        Returns:
+            A dictionary with diagnostics
+        """
+        # Make a prediction and minimize cross-entropy-loss
+        logits = self.clf(obs)
+        clf_loss = F.cross_entropy(logits, skills)
+
+        # Minimize it
+        clf_grad_norm = utils.optimize(
+            loss=clf_loss,
+            optimizer=self.clf_optimizer,
+            norm_clip=self.cfg.clf_grad_norm_clip,
+        )
+
+        # Diagnostics
+        info = {}
+        info['ClfAccuracy'] = (logits.argmax(dim=-1) == skills).float().mean()
+        info['ClfLoss'] = clf_loss.detach()
+        info['ClfGradNorm'] = clf_grad_norm
+
+        return info
+
+    def update_critics(self, obs, skills, acs, next_obs, dones):
+        """
+        Updates parameters of the critics (Q-functions)
 
         Args:
             obs (Tensor<N,O>): A batch of obervations, each O floats
@@ -350,16 +405,10 @@ class DIAYN(agents.Agent):
             dones (Tensor<N>): A batch of done flags, each a single float
 
         Returns:
-            A differentiable discriminator loss (cross entropy),
-            differentiable losses (entropy bellman mse) for both critics,
-            and a dictionary with detached diagnostics.
+            A dictinoary with diagnostics
         """
-
         # Generate standard cross-entropy loss for the discriminator
-        logits = self.clf(obs)
-        clf_xe = F.cross_entropy(logits, skills, reduction='none')
-        clf_loss = clf_xe.mean()
-
+        clf_xe = F.cross_entropy(self.clf(next_obs), skills, reduction='none')
         # Then, use the cross-entropy to generate a synthetic reward
         rews = -1 * clf_xe.detach()
         # Subtract (uniform) log likelihood
@@ -392,25 +441,37 @@ class DIAYN(agents.Agent):
             # Combine with rewards using the Bellman recursion
             q_target = rews + (1. - dones) * self.cfg.gamma * target_q_values
 
-        # Minimize squared distance
+        # Use mean squared error as loss
         qf1_loss = F.mse_loss(q1_pred, q_target)
         qf2_loss = F.mse_loss(q2_pred, q_target)
 
+        # And minimize it
+        qf1_grad_norm = utils.optimize(
+            loss=qf1_loss,
+            optimizer=self.qf1_optimizer,
+            norm_clip=self.cfg.critic_grad_norm_clip,
+        )
+        qf2_grad_norm = utils.optimize(
+            loss=qf2_loss,
+            optimizer=self.qf2_optimizer,
+            norm_clip=self.cfg.critic_grad_norm_clip,
+        )
+
         # Diagonstics
         info = {} # For later
-        info['ClfLoss'] = clf_loss.detach()
-        info['ClfAccuracy'] = (logits.argmax(dim=-1) == skills).float().mean()
-        info['ClfReward'] = rews.mean()
+        info['DIAYNReward'] = rews.mean()
         info['QTarget'] = q_target.mean().detach()
         info['QAbsDiff'] = (q1_pred - q2_pred).abs().mean().detach()
         info['Qf1Loss'] = qf1_loss.detach()
         info['Qf2Loss'] = qf2_loss.detach()
+        info['Qf1GradNorm'] = qf1_grad_norm
+        info['Qf2GradNorm'] = qf2_grad_norm
 
-        return clf_loss, qf1_loss, qf2_loss, info
+        return info
 
-    def actor_objective(self, obs, skills):
+    def update_actor(self, obs, skills):
         """
-        Generates losses for the policy and alpha parameter
+        Updates parameters for the policy (and possibly alpha)
 
         Args:
             obs (Tensor<N,O>): A batch of observations, each O floats
@@ -437,18 +498,90 @@ class DIAYN(agents.Agent):
         # -> loss is negative q + negative entropy
         policy_loss = (self.alpha * log_prob - q_values).mean()
 
+        # Minimize it
+        policy_grad_norm = utils.optimize(
+            loss=policy_loss,
+            optimizer=self.policy_optimizer,
+            norm_clip=self.cfg.policy_grad_norm_clip,
+        )
+
         # Generate loss for the alpha value
         target_entropy_plus_logp = log_prob.detach() + self.target_entropy
         alpha_loss = (-self.log_alpha * target_entropy_plus_logp).mean()
+        # But only minimize it if configured
+        if self.cfg.train_alpha:
+            utils.optimize(alpha_loss, self.alpha_optimizer)
 
         # Diagnostics
         info = {}
         info['Entropy'] = -log_prob.mean().detach()
         info['PolicyLoss'] = policy_loss.detach()
+        info['PolicyGradNorm'] = policy_grad_norm
         info['AlphaLoss'] = alpha_loss.detach()
         info['AlphaValue'] = self.alpha
 
-        return policy_loss, alpha_loss, info
+        return info
+
+    def update_targets(self):
+        """
+        Applies polyak averaging to the target network of both q-functions
+        """
+        utils.polyak(
+            net=self.qf1, target=self.qf1_target,
+            tau=self.cfg.target_update_tau
+        )
+        utils.polyak(
+            net=self.qf2, target=self.qf2_target,
+            tau=self.cfg.target_update_tau
+        )
+
+    def evaluate(self, epoch=None, render=False, greedy=False):
+        """
+        Evaluate the current policy across all skills
+
+        Args:
+            epoch (int): Used to determine whether to do rendering if set
+            render (bool): Manually specifies whether to render
+            greedy (bool): Whether to do mean action (false=sample action)
+
+        Returns:
+            A tuple containing
+            - A dictionary of eval results {Return: [...], TrajLen: [...]}
+            - A list of video frames for each skill (None if not rendering)
+        """
+        # Determine whether we should render for this epoch
+        if render:
+            render = True
+        elif epoch is None:
+            render = False
+        elif self.cfg.eval_video_freq <= 0:
+            render = False
+        else:
+            eval_num = epoch // self.cfg.eval_freq
+            render = eval_num % self.cfg.eval_video_freq == 0
+
+        # Rollout all skills
+        info = []
+        frames = []
+        for skill in range(self.cfg.num_skills):
+            with self.policy.configure(greedy=greedy, skill_dist=skill):
+                info_, frames_ = self.eval_sampler.evaluate(
+                    n=self.cfg.eval_size,
+                    render=render,
+                    render_max=self.cfg.eval_video_length,
+                    render_size=tuple(self.cfg.eval_video_size),
+                )
+            info.append(info_)
+            frames.append(frames_)
+
+        # Combine: list of dicts of lists -> dict of lists
+        info = {
+            k: functools.reduce(operator.add, (i[k] for i in info))
+            for k in info[0]
+        }
+        frames = frames if render else None
+
+        return info, frames
 
 
 
