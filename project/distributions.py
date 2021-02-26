@@ -235,9 +235,10 @@ class TanhGMM(GMM):
     def logp_correction(self, action_pre_tanh):
         """Get the correction term for logp after tanh sqeeze"""
         if self.use_spinup_logp:
-            return tanh_logp_correction_sac(action_pre_tanh)
-        else:
             return tanh_logp_correction_spinup(action_pre_tanh)
+        else:
+            return tanh_logp_correction_sac(action_pre_tanh)
+
 
 
 def tanh_logp_correction_sac(action_pre_tanh):
@@ -267,15 +268,16 @@ def tanh_logp_correction_sac(action_pre_tanh):
     # Combine: log of product -> sum of logs
     return - torch.log(da_du_clipped + 1e-6).sum(dim=-1)
 
+
 def tanh_logp_correction_spinup(action_pre_tanh):
     """
     Variation on log_prob_from_pre_tanh_sac sourced from the
     "Spinning Up" repository that is supposed to be more
     numerically stable.
     """
-    corr -2 * (
+    corr = -2 * (
         + np.log(2)
         - action_pre_tanh
         - F.softplus(-2 * action_pre_tanh)
     )
-    return corr.squeeze(-1)
+    return corr.sum(dim=-1).squeeze(-1)
