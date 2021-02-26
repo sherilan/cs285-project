@@ -73,8 +73,6 @@ class Policy(nn.Module):
             ]
             pi = self(*observations)
             action = pi.sample(greedy=self.greedy if greedy is None else greedy)
-            if self.debug:
-                import pdb; pdb.set_trace()
             return action.cpu().numpy(), {}
 
 
@@ -293,7 +291,7 @@ class TanhGMMMLPPolicy(GMMMLPPolicy):
 
     def forward(self, *observations):
         logits, means, logstds = self.get_logits_means_and_logstds(*observations)
-        q_values = None if self.qf is None else self.get_q_values(observations, means)
+        q_values = self.get_q_values(observations, means)
         return distributions.TanhGMM(logits, means, logstds, q_values=q_values)
 
 
@@ -302,6 +300,8 @@ class TanhGMMMLPPolicy(GMMMLPPolicy):
 class SkillConditionedPolicy(Policy):
     """
     Wrapper around any other policy that allows skill conditioning
+
+    TODO: deprecate. Use mixin instead.
     """
 
     def __init__(self,
@@ -347,3 +347,55 @@ class SkillConditionedPolicy(Policy):
 
     def forward(self, *observations):
         return self.base(*observations)
+
+
+class SkillConditionedMixin:
+    """
+    Mixin for MLP-like policies that are conditioned on the current skill
+
+    To mix with another policy PI, combine it like:
+
+    class SkillConditionedPI(SkillConditionedMixin, PI):
+        pass
+
+    That way, the methods below will appear first in the MRO
+    call order of the mixed class.
+    """
+
+    def __init__(self, ob_dim, num_skills, **kwargs):
+        super().__init__(ob_dim=ob_dim + num_skills, **kwargs)
+        self.num_skills = num_skills
+        self.skill_dist = None
+        self.skill = None
+
+    def reset(self):
+        super().reset()
+        # If no prob dist, sample uniform
+        if self.skill_dist is None:
+            self.skill = np.random.randint(self.num_skills)
+        # If an scalar, assume har_coded skill integer
+        elif np.isscalar(self.skill_dist):
+            self.skill = int(self.skill_dist)
+        # If callable, assume that it will return a new skill
+        elif callable(self.skill_dist):
+            self.skill = self.skill_dist()
+        # Otherwise, assume just a normal categorical distribution
+        else:
+            self.skill = np.random.choice(self.num_skills, p=self.skill_dist)
+
+    def get_action(self, *observations):
+        # Augment observations with a one-hot vector of current skill
+        skill_one_hot = torch.zeros(self.num_skills)
+        skill_one_hot[self.skill] = 1.0
+        observations_aug = observations + (skill_one_hot,)
+        # Get action as normal and include current skill in the info dict
+        ac, info = super().get_action(*observations_aug)
+        info['skill'] = self.skill
+        return ac, info
+
+
+class SkillConditionedTanhGaussianMLPPolicy(SkillConditionedMixin, TanhGaussianMLPPolicy):
+    pass
+
+class SkillConditionedTanhGMMMLPPolicy(SkillConditionedMixin, TanhGMMMLPPolicy):
+    pass
