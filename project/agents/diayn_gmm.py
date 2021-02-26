@@ -112,15 +112,14 @@ class DIAYNGMM(agents.Agent):
         ob_dim, = self.train_env.observation_space.shape
         ac_dim, = self.train_env.action_space.shape
         # Setup policy, baseline, and critic
-        self.policy = policies.SkillConditionedPolicy(
-            base=policies.TanhGMMMLPPolicy(
-                ob_dim + self.cfg.num_skills, ac_dim,
-                num_components=self.cfg.policy_num_components,
-                hidden_num=self.cfg.policy_hidden_num,
-                hidden_size=self.cfg.policy_hidden_size,
-                hidden_act=self.cfg.policy_hidden_act,
-            ),
+        self.policy = policies.SkillConditionedTanhGMMMLPPolicy(
+            ob_dim=ob_dim,
             num_skills=self.cfg.num_skills,
+            ac_dim=ac_dim,
+            num_components=self.cfg.policy_num_components,
+            hidden_num=self.cfg.policy_hidden_num,
+            hidden_size=self.cfg.policy_hidden_size,
+            hidden_act=self.cfg.policy_hidden_act,
         )
         self.vf = critics.MLPBaseline(
             ob_dim + self.cfg.num_skills,
@@ -249,7 +248,7 @@ class DIAYNGMM(agents.Agent):
                 for train_step in range(self.cfg.num_train_steps):
 
                     # Sample batch (and convert all to torch tensors)
-                    obs, skills, acs, rews, next_obs, dones = self.buffer.sample(
+                    obs, skills, acs, _, next_obs, dones = self.buffer.sample(
                         self.cfg.batch_size,
                         tensor=True,
                         device=self.device,
@@ -430,9 +429,10 @@ class DIAYNGMM(agents.Agent):
 
         # Policy gradient loss (with gmm regularization)
         policy_loss = - (logp_pre_tanh * policy_objective).mean()
-        policy_loss += self.cfg.policy_gmm_reg * pi.reg_loss()
+        policy_reg_loss = self.cfg.policy_gmm_reg * pi.reg_loss()
+
         policy_grad_norm = utils.optimize(
-            loss=policy_loss,
+            loss=policy_loss + policy_reg_loss,
             optimizer=self.policy_optimizer,
             norm_clip=self.cfg.policy_grad_norm_clip,
         )
@@ -457,6 +457,8 @@ class DIAYNGMM(agents.Agent):
         info = {}
         info['Entropy'] = -log_prob.mean().detach()
         info['PolicyLoss'] = policy_loss.detach()
+        info['PolicyObjective'] = policy_objective.abs().mean()
+        info['PolicyRegLoss'] = policy_reg_loss.detach()
         info['PolicyGradNorm'] = policy_grad_norm
         info['VfLoss'] = vf_loss.detach()
         info['VfGradNorm'] = vf_grad_norm
@@ -503,7 +505,7 @@ class DIAYNGMM(agents.Agent):
         info = []
         frames = []
         for skill in range(self.cfg.num_skills):
-            with self.policy.configure(greedy=greedy, skill_dist=skill):
+            with self.policy.configure(greedy=greedy, skill_dist=skill, qf=self.qf):
                 info_, frames_ = self.eval_sampler.evaluate(
                     n=self.cfg.eval_size,
                     render=render,
