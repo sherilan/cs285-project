@@ -72,8 +72,9 @@ class Policy(nn.Module):
                 for o in observations
             ]
             pi = self(*observations)
-            action = pi.sample(greedy=self.greedy if greedy is None else greedy)
-            return action.cpu().numpy(), {}
+            greedy = self.greedy if greedy is None else greedy
+            action = pi.sample(greedy=greedy)
+            return action.cpu().numpy(), {'greedy': greedy}
 
 
 class GaussianMLPPolicy(Policy):
