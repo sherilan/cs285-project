@@ -141,15 +141,6 @@ class GMM(PolicyDistribution):
         self.means = means
         self.logstds = logstds
         self.q_values = q_values
-        self.mixture = torch.distributions.MixtureSameFamily(
-            mixture_distribution=torch.distributions.Categorical(
-                probs=torch.softmax(logits, dim=-1)
-            ),
-            component_distribution=torch.distributions.Independent(
-                torch.distributions.Normal(means, logstds.exp()),
-                reinterpreted_batch_ndims=1,
-            ),
-        )
 
     @property
     def b_dim(self):
@@ -160,38 +151,76 @@ class GMM(PolicyDistribution):
         return self.means.shape[-2]
 
     @property
-    def x_dim(self):
+    def a_dim(self):
         return self.means.shape[-1]
 
     def sample(self, greedy=False, grad=False):
 
-        if grad:
-            raise NotImplementedError('Cannot r-sample GMM')
-
+        # Case: greedy -> select mean of strongest mixture
         if greedy:
             # Case: no q-values -> select component with highest mixture prob
             if self.q_values is None:
-                k = self.logits.reshape(-1, self.k_dim).argmax(dim=-1)  # (|b_dim|)
-            # Case: q-values -> select component with highest q-value
+                z = self.logits.argmax(dim=-1)
+            # Case: q-values -> argmax over them instead
             else:
-                k = self.q_values.reshape(-1, self.k_dim).argmax(dim=-1)
-            m = self.means.reshape(-1, self.x_dim) # (|b_dim| * k_dim, x_dim )
-            # Map k to correct index in m
-            i = k + torch.arange(int(np.prod(self.b_dim)), device=k.device) * self.k_dim
-            return m[i].reshape(self.b_dim + (self.x_dim,)).detach()
+                z = self.q_values.argmax(dim=-1)
+
+            # Create a softmax-based path fort the gradient
+            grad_path = self.logits.softmax(dim=-1)
+
+            # Create a 1-hot mask of the argmax values
+            z_mask = torch.zeros_like(self.logits).scatter_(-1, z, 1.0)
+
+            # Add zero to the argmax mask, but keep the gradient of the
+            # positive term. That way, the ones in the mask will get
+            # gradient proportional to the softmax strength
+            mask = z_mask - grad_path.detach() + grad_path
+
+            # Select from the means
+            action = (self.means * mask.unsqueeze(-1)).sum(dim=-2)
+
+        # Case: stochastic -> properly sample mixture
         else:
-            # Just sample
-            return self.mixture.sample()
+            # Get components with a differentiable gumbel softmax distribution
+            mask = F.gumbel_softmax(self.logits, hard=True, dim=-1).unsqueeze(-1)
+            mean = (self.means * mask).sum(dim=-2)
+            logstd = (self.logstds * mask).sum(dim=-2)
+            # Then use standard reparametrization on the result
+            eps = torch.randn(self.b_dim + (self.a_dim,), device=mean.device)
+            action = mean + logstd.exp() * eps
+
+        return action if grad else action.detach()
+
 
     def log_prob(self, action):
-        return self.mixture.log_prob(action)
+        # Compute log p(x|z) = log N(m(z), s(z))
+        logp_given_z = self.log_normal(
+            action[...,None,:], self.means, self.logstds
+        )
 
-    def reg_loss(self):
-        """Regularization loss for the gaussians"""
-        loss = 0
-        loss += 0.5 * (self.means ** 2).mean()
-        loss += 0.5 * (self.logstds ** 2).mean()
-        return loss
+        # Compute log p(x) = log sum(p(z_i)*p(x|z_i))
+        #                  = log sum(exp(log(z_i) + log(x|z_i)))
+        logp = (
+            torch.logsumexp(self.logits + logp_given_z, dim=-1)
+          - torch.logsumexp(self.logits, dim=-1)  # Normalizing factor
+        )
+        return logp
+
+
+    def log_normal(self, x, mean, logstd):
+        """
+        Computes the logarithm of a (diagonal) multivariate normal PDF
+        evaluated at x
+        """
+        # Squared value in the exponent of a gaussian
+        dist = (x - mean) * torch.exp(-logstd)
+        quadratic = -0.5 * (dist ** 2).sum(dim=-1)
+        # Divisor of ormalizing factor (1/(sig * sqrt(2 * PI)))
+        # The right term is multiplied by x_dim so that the value is repeated
+        # for each dimension in the (diagonal) multivariate
+        c = logstd.sum(dim=-1) + self.a_dim * 0.5 * np.log(2 * np.pi)
+        # Combine, negative c since it is log of a divisor
+        return quadratic - c
 
 
 class TanhGMM(GMM):
@@ -281,3 +310,10 @@ def tanh_logp_correction_spinup(action_pre_tanh):
         - F.softplus(-2 * action_pre_tanh)
     )
     return corr.sum(dim=-1).squeeze(-1)
+
+
+def tanh_logp_correction_eysenbach(action_pre_tanh):
+    """
+    The simplest corection of tanh logp. Used in Eysenbach's repo
+    """
+    return - torch.log(1 - torch.tanh(action_pre_tanh) ** 2 + 1e-6).sum(dim=-1)
