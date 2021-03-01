@@ -23,13 +23,14 @@ class SAC(agents.Agent):
         # -- General
         env = 'HalfCheetah-v2'
         gamma = 0.99  # Discount factor
-        num_epochs = 1_000
-        num_samples_per_epoch = 250
-        num_train_steps_per_epoch = 500
+        num_epochs = 500
+        num_samples_per_epoch = 1000
+        num_train_steps_per_epoch = 1000
         batch_size = 128
         buffer_capacity = 1_000_000
         min_buffer_size = 10_000  # Min samples in replay buffer before training starts
         max_path_length_train = 1_000
+        save_freq = 100
 
         # -- Evaluation
         eval_freq = 20
@@ -247,6 +248,16 @@ class SAC(agents.Agent):
 
             # Write logs
             epoch_logs.dump(step=self.train_sampler.total_steps)
+
+            # Save checkpoint
+            if (
+                epoch % self.cfg.save_freq == 0 and
+                self.savedir is not None
+            ):
+                filename = f'agent-{str(epoch).zfill(5)}.pt'
+                self.save(name=filename)
+                self.logger.info('Agent saved to %s', filename)
+
 
     def get_data_info(self, debug=False):
         """
