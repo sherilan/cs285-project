@@ -46,7 +46,7 @@ class DIAYNGMM(agents.Agent):
 
 
         LR = 3e-4
-        WIDTH = 128
+        WIDTH = 300
 
         # -- Policy
         policy_hidden_num = 2
