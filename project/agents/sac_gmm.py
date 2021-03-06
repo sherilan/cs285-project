@@ -54,6 +54,7 @@ class SACGMM(agents.Agent):
         buffer_capacity = 10_000_000
         min_buffer_size = 1_000  # Min samples in replay buffer before training starts
         max_path_length_train = 1_000
+        save_freq = 100
 
         # -- Evaluation and logging
         eval_freq = 50
@@ -277,6 +278,15 @@ class SACGMM(agents.Agent):
             # Add information about replay buffer to logs and dump them
             epoch_logs.add_scalar_dict(self.get_data_info(), prefix='Data')
             epoch_logs.dump(step=self.train_sampler.total_steps)
+
+            # Save checkpoint
+            if (
+                epoch % self.cfg.save_freq == 0 and
+                self.savedir is not None
+            ):
+                filename = f'agent-{str(epoch).zfill(5)}.pt'
+                self.save(name=filename)
+                self.logger.info('Agent saved to %s', filename)
 
 
     def get_data_info(self, debug=False):
