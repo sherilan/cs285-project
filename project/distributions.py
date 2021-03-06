@@ -154,6 +154,12 @@ class GMM(PolicyDistribution):
     def a_dim(self):
         return self.means.shape[-1]
 
+    def reg_loss(self):
+        loss = 0
+        loss += 0.5 * (self.means ** 2).mean()
+        loss += 0.5 * (self.logstds ** 2).mean()
+        return loss
+
     def sample(self, greedy=False, grad=False):
 
         # Case: greedy -> select mean of strongest mixture
