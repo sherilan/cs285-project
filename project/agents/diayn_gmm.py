@@ -27,11 +27,11 @@ class DIAYNGMM(agents.Agent):
         env = 'HalfCheetah-v2'
         num_skills = 50
         gamma = 0.99  # Discount factor
-        num_epochs = 1_000
+        num_epochs = 10_000
         num_steps_per_epoch = 1_000
         num_train_steps = 1
         batch_size = 128
-        buffer_capacity = 1_000_000
+        buffer_capacity = 10_000_000
         min_buffer_size = 1_000  # Min samples in replay buffer before training starts
         max_path_length_train = 1_000
 
@@ -78,7 +78,7 @@ class DIAYNGMM(agents.Agent):
 
         # -- Discriminator
         clf_hidden_num = 2
-        clf_hidden_size = 128
+        clf_hidden_size = WIDTH
         clf_hidden_act = 'relu'
         clf_optimizer = 'adam'
         clf_lr = LR

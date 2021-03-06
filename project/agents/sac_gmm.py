@@ -47,12 +47,12 @@ class SACGMM(agents.Agent):
         # -- General
         env = 'HalfCheetah-v2'
         gamma = 0.99  # Discount factor
-        num_epochs = 1_000
+        num_epochs = 10_000
         num_steps_per_epoch = 1_000
         num_train_steps = 1
         batch_size = 128
-        buffer_capacity = 1_000_000
-        min_buffer_size = 10_000  # Min samples in replay buffer before training starts
+        buffer_capacity = 10_000_000
+        min_buffer_size = 1_000  # Min samples in replay buffer before training starts
         max_path_length_train = 1_000
 
         # -- Evaluation and logging
