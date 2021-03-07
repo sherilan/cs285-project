@@ -38,7 +38,7 @@ class DIAYN(agents.Agent):
         num_train_steps_per_epoch = 1000
         batch_size = 128
         buffer_capacity = 10_000_000
-        min_buffer_size = 10_000  # Min samples in replay buffer before training starts
+        min_buffer_size = 1_000  # Min samples in replay buffer before training starts
         max_path_length_train = 1_000
         log_freq = 1
         save_freq = 100
@@ -65,12 +65,13 @@ class DIAYN(agents.Agent):
         policy_grad_norm_clip = None #10.0
 
         # -- Discriminator
+        clf_enc_enable = True
         clf_enc_initial_steps = 1000
         clf_enc_hidden_num = 0
         clf_enc_hidden_size = 64
         clf_enc_dim = 5
         clf_hidden_num = 2
-        clf_hidden_size = 128
+        clf_hidden_size = WIDTH
         clf_hidden_act = 'relu'
         clf_optimizer = 'adam'
         clf_lr = LR
@@ -124,22 +125,27 @@ class DIAYN(agents.Agent):
             hidden_size=self.cfg.policy_hidden_size,
             hidden_act=self.cfg.policy_hidden_act,
         )
-        self.encoder = networks.MLP(
-            input_size=ob_dim,
-            output_size=self.cfg.clf_enc_dim,
-            hidden_size=self.cfg.clf_enc_hidden_size,
-            hidden_num=self.cfg.clf_enc_hidden_num,
-            hidden_act=self.cfg.clf_hidden_act
-        )
+        if self.cfg.clf_enc_enable:
+            enc_dim = self.cfg.clf_enc_dim
+            self.encoder = networks.MLP(
+                input_size=ob_dim,
+                output_size=self.cfg.clf_enc_dim,
+                hidden_size=self.cfg.clf_enc_hidden_size,
+                hidden_num=self.cfg.clf_enc_hidden_num,
+                hidden_act=self.cfg.clf_hidden_act
+            )
+        else:
+            enc_dim = ob_dim
+            self.encoder = nn.Identity()
         self.clf_gan = networks.MLP(
-            input_size=self.cfg.clf_enc_dim,
+            input_size=enc_dim,
             output_size=2,
             hidden_num=self.cfg.clf_hidden_num,
             hidden_size=self.cfg.clf_hidden_size,
             hidden_act=self.cfg.clf_hidden_act,
         )
         self.clf_diayn = networks.MLP(
-            input_size=self.cfg.clf_enc_dim,
+            input_size=enc_dim,
             output_size=self.cfg.num_skills,
             hidden_num=self.cfg.clf_hidden_num,
             hidden_size=self.cfg.clf_hidden_size,
@@ -255,9 +261,10 @@ class DIAYN(agents.Agent):
                 - Polyak average the target networks of the critics
             - Evaluate the current policy
         """
-        # Initialize buffer with expert data
-        self.logger.info('Procuring expert data')
-        self.load_expert_data()
+        # Fit encoder
+        if self.cfg.clf_enc_enable:
+            self.logger.info('Fitting encoder')
+            self.pretrain_encoder()
 
         # Generate initial data for the replay buffer
         missing_data = self.cfg.min_buffer_size - len(self.buffer)
@@ -266,26 +273,6 @@ class DIAYN(agents.Agent):
             self.buffer << self.train_sampler.sample_steps(
                 n=missing_data, random=False
             )
-
-        self.logger.info('Fitting encoder')
-        for i in range(self.cfg.clf_enc_initial_steps):
-            expert_obs, = self.expert_buffer.sample(
-                self.cfg.batch_size,
-                tensor=True,
-                device=self.device,
-                as_dict=False
-            )
-            obs, *_ = self.buffer.sample(
-                self.cfg.batch_size,
-                tensor=True,
-                device=self.device,
-                as_dict=False,
-            )
-            clf_gan_info = self.update_clf_gan(obs=obs, expert_obs=expert_obs)
-            if i % 100 == 0:
-                self.logger.info('Discriminator: %s', clf_gan_info)
-
-
 
         self.logger.info('Begin training')
         for epoch in range(1, self.cfg.num_epochs + 1):
@@ -309,17 +296,6 @@ class DIAYN(agents.Agent):
                     device=self.device,
                     as_dict=False,
                 )
-
-                if False and step % self.cfg.num_skills == 0:
-                    # Sample expert data and train gan
-                    expert_obs, = self.expert_buffer.sample(
-                        self.cfg.batch_size,
-                        tensor=True,
-                        device=self.device,
-                        as_dict=False
-                    )
-                    clf_gan_info = self.update_clf_gan(obs=obs, expert_obs=expert_obs)
-                    epoch_logs.add_scalar_dict(clf_gan_info, prefix='Disc')
 
                 # Train discriminator
                 disc_info = self.update_disc(obs=obs, skills=skills)
@@ -689,16 +665,51 @@ class DIAYN(agents.Agent):
                 raise ValueError('Not enough expert data!')
             expert_data = expert_data_filtered
         # Initialize buffer
-        self.expert_buffer = buffers.RingBuffer(
+        expert_buffer = buffers.RingBuffer(
             capacity=sum(len(path['ob']) for path in expert_data),
             keys=['ob'],
             dims=[self.ob_dim],
         )
-        self.logger.info('Initialized expert buffer (%s)', self.expert_buffer)
+        self.logger.info('Initialized expert buffer (%s)', expert_buffer)
         # And fill it
         for path in expert_data:
-            self.expert_buffer << path
-        self.logger.info('Filled expert buffer (%s)', self.expert_buffer)
+            expert_buffer << path
+        self.logger.info('Filled expert buffer (%s)', expert_buffer)
+        return expert_buffer
+
+
+    def pretrain_encoder(self):
+
+        self.logger.info('Loading expert data')
+        expert_buffer = self.load_expert_data()
+
+        self.logger.info('Sampling random data')
+        rand_buffer = buffers.RingBuffer(
+            capacity=len(expert_buffer),
+            keys=['ob'],
+            dims=[self.ob_dim],
+        )
+        rand_buffer << self.train_sampler.sample_steps(
+            n=len(expert_buffer), random=True
+        )
+        self.logger.info('Random data: %s', rand_buffer)
+
+        for i in range(self.cfg.clf_enc_initial_steps):
+            expert_obs, = expert_buffer.sample(
+                self.cfg.batch_size,
+                tensor=True,
+                device=self.device,
+                as_dict=False
+            )
+            obs, = rand_buffer.sample(
+                self.cfg.batch_size,
+                tensor=True,
+                device=self.device,
+                as_dict=False,
+            )
+            clf_gan_info = self.update_clf_gan(obs=obs, expert_obs=expert_obs)
+            if i % 100 == 0:
+                self.logger.info('Discriminator: %s', clf_gan_info)
 
 
 
