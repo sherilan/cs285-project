@@ -169,7 +169,7 @@ class GMMMLPPolicy(Policy):
         num_components=4,
         static_std=False,
         init_std=1.0,
-        min_std=np.exp(-20.0),
+        min_std=np.exp(-5.0),
         max_std=np.exp(2.0),
         min_component_prob=np.exp(-10),
         qf=None,
@@ -251,7 +251,7 @@ class GMMMLPPolicy(Policy):
             )
         # Possibly clamp logits
         if self.min_component_prob is not None:
-            logits = logits.clamp(self.min_component_prob)
+            logits = logits.clamp(min=self.min_component_prob)
         return logits, means, logstds
 
     def reshape_components(self, components_flat):
