@@ -65,6 +65,7 @@ class DIAYN(agents.Agent):
         policy_grad_norm_clip = None #10.0
 
         # -- Discriminator
+        clf_enc_initial_steps = 1000
         clf_enc_hidden_num = 0
         clf_enc_hidden_size = 64
         clf_enc_dim = 5
@@ -267,7 +268,7 @@ class DIAYN(agents.Agent):
             )
 
         self.logger.info('Fitting encoder')
-        for i in range(1000):
+        for i in range(self.cfg.clf_enc_initial_steps):
             expert_obs, = self.expert_buffer.sample(
                 self.cfg.batch_size,
                 tensor=True,
